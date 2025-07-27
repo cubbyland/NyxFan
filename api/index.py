@@ -1,218 +1,258 @@
-import os, sys, json
+import os
+import json
+import sys
 from pathlib import Path
 from dotenv import load_dotenv
 from telegram import (
     Update,
-    InlineKeyboardMarkup,
     InlineKeyboardButton,
-    ForceReply,
-    BotCommand,
+    InlineKeyboardMarkup,
 )
 from telegram.ext import (
     Application,
     CommandHandler,
     CallbackQueryHandler,
-    MessageHandler,
-    filters,
     ContextTypes,
 )
+from telegram.error import BadRequest
 
-# allow imports from shared/
+# allow shared imports
 sys.path.append(str(Path(__file__).resolve().parents[2]))
 from shared.fan_registry import register_user, get_telegram_id
-from shared.presets import get_template
 
-# load environment
+# load config
 load_dotenv(dotenv_path=Path(__file__).resolve().parent.parent / ".env")
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-if not BOT_TOKEN:
-    raise RuntimeError("BOT_TOKEN not set")
 
-app = Application.builder().token(BOT_TOKEN).build()
+BOT_TOKEN    = os.getenv("BOT_TOKEN")
+BOT_USERNAME = os.getenv("BOT_USERNAME")
+INBOX_URL    = os.getenv("INBOX_URL", "https://example.com/inbox")
+PROFILE_URL  = os.getenv("PROFILE_URL", "https://example.com/profile")
 
-# register commands in Telegram menu
-app.bot.set_my_commands([
-    BotCommand("start",         "Onboard & toggle notifications"),
-    BotCommand("menu",          "Show all commands"),
-    BotCommand("subscribe",     "Subscribe to a creator"),
-    BotCommand("unsubscribe",   "Unsubscribe from a creator"),
-    BotCommand("subscriptions", "List your subscriptions"),
-    BotCommand("silence",       "Pause all alerts"),
-    BotCommand("unsilence",     "Resume alerts & show digest"),
-])
+if not BOT_TOKEN or not BOT_USERNAME:
+    raise RuntimeError("BOT_TOKEN and BOT_USERNAME must be set in .env")
 
-# shared queue path
+app        = Application.builder().token(BOT_TOKEN).build()
 QUEUE_PATH = Path(__file__).resolve().parents[2] / "shared" / "command_queue.json"
 
-# in-memory stores
-USER_PREFS: dict[int, dict] = {}
-MISSED_STORE: dict[int, list] = {}
-PENDING_REPLY: dict[int, tuple[str,str]] = {}
+ALL_DASH_MSGS: dict[int, list[int]] = {}
+USER_DISP:     dict[int, str]       = {}
 
-def read_queue():
+def read_queue() -> list:
     try:
         return json.loads(QUEUE_PATH.read_text())
     except:
         return []
 
-def write_queue(q):
+def write_queue(q: list) -> None:
     QUEUE_PATH.write_text(json.dumps(q, indent=2))
 
+def build_dashboard(tg_id: int) -> tuple[str, InlineKeyboardMarkup]:
+    disp   = USER_DISP.get(tg_id, str(tg_id))
+    header = f"{disp}’s Dashboard"
+    queue  = read_queue()
+    summary: dict[str, dict[str, int]] = {}
+
+    for c in queue:
+        if c["type"] not in ("relay", "subchg"):
+            continue
+        if get_telegram_id(str(c["nyx_id"])) != tg_id:
+            continue
+        grp = summary.setdefault(c["creator"], {"posts": 0, "prices": 0})
+        if c["type"] == "relay":
+            grp["posts"] += 1
+        else:
+            grp["prices"] += 1
+
+    if summary:
+        lines = ["🔔 *Pending Alerts:*", ""]
+        for creator, cnts in summary.items():
+            parts: list[str] = []
+            if cnts["posts"]:
+                url = f"https://t.me/{BOT_USERNAME}?start=filter_relay_{creator}"
+                parts.append(f"[{cnts['posts']} post{'s' if cnts['posts']>1 else ''}]({url})")
+            if cnts["prices"]:
+                url = f"https://t.me/{BOT_USERNAME}?start=filter_subchg_{creator}"
+                parts.append(f"[{cnts['prices']} price update{'s' if cnts['prices']>1 else ''}]({url})")
+            lines.append(f"#{creator}: " + " | ".join(parts))
+        body = "\n".join(lines)
+    else:
+        body = "🔔 No pending alerts."
+
+    kb = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("View All", callback_data="show_alerts"),
+            InlineKeyboardButton("Inbox", url=INBOX_URL),
+        ],
+        [
+            InlineKeyboardButton("Profile", url=PROFILE_URL),
+            InlineKeyboardButton("Settings", callback_data="show_settings"),
+        ],
+    ])
+    return f"{header}\n\n{body}", kb
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    tg   = update.effective_user.id
+    disp = update.effective_user.username or update.effective_user.full_name or str(tg)
+    register_user(tg, disp)
+    USER_DISP[tg] = disp
+
+    # notify proxy bot about the join
+    queue = read_queue()
+    queue.append({
+        "type": "joined",
+        "nyx_id": str(tg),
+        "display": disp
+    })
+    write_queue(queue)
+
+    # deep-link filters...
+    if context.args:
+        arg = context.args[0]
+        queue = read_queue()
+        kept, to_send = [], []
+        for c in queue:
+            if (
+                get_telegram_id(str(c["nyx_id"])) == tg
+                and c["type"] in ("relay","subchg")
+                and arg.split("_",2)[1] == c["type"]
+                and c["creator"] == arg.split("_",2)[2]
+            ):
+                to_send.append(c)
+            else:
+                kept.append(c)
+        write_queue(kept)
+        for c in to_send:
+            text = (
+                f"🆕 New post from *{c['creator']}*:\n{c['title']}\n{c['url']}"
+                if c["type"] == "relay"
+                else f"💲 Price update by *{c['creator']}*:\n{c['old_price']} → {c['new_price']}"
+            )
+            await update.message.reply_text(text, parse_mode="Markdown")
+
+    # send fresh dashboard first
+    text, kb = build_dashboard(tg)
+    msg = await update.message.reply_text(text, parse_mode="Markdown", reply_markup=kb)
+    new_ids = [msg.message_id]
+
+    # then delete old dashboards
+    for mid in ALL_DASH_MSGS.get(tg, []):
+        try:
+            await context.bot.delete_message(chat_id=tg, message_id=mid)
+        except BadRequest:
+            pass
+
+    ALL_DASH_MSGS[tg] = new_ids
 
 async def process_relay_commands(context: ContextTypes.DEFAULT_TYPE):
     queue = read_queue()
     new_q = []
-    for cmd in queue:
-        t = cmd.get("type")
+    bot   = context.bot
 
-        # relay new post
-        if t == "relay":
-            nyx_id   = str(cmd["nyx_id"])
-            tg       = get_telegram_id(nyx_id)
-            prefs    = USER_PREFS.setdefault(tg, {"silenced": False, "subscriptions": set()})
-            if not tg or prefs["silenced"] or cmd["creator"] not in prefs["subscriptions"]:
-                new_q.append(cmd)
-                continue
+    for c in queue:
+        tg = get_telegram_id(str(c["nyx_id"]))
+        if not tg:
+            new_q.append(c)
+            continue
 
-            text_img = get_template(cmd["title"], cmd["creator"], cmd["title"], cmd["url"], cmd.get("image_url"))
-            text, img = text_img if text_img else (f"🆕 New from *{cmd['creator']}*: {cmd['url']}", None)
-            kb = InlineKeyboardMarkup([[InlineKeyboardButton("👉 View Post", url=cmd["url"])]])
-            if img:
-                await context.bot.send_photo(chat_id=tg, photo=img, caption=text, reply_markup=kb, parse_mode="Markdown")
-            else:
-                await context.bot.send_message(chat_id=tg, text=text, reply_markup=kb, parse_mode="Markdown")
+        if c["type"] == "dm":
+            await bot.send_message(
+                chat_id=tg,
+                text=f"✉️ DM from *{c['creator']}*:\n{c['message']}",
+                parse_mode="Markdown"
+            )
+            continue
 
-        # subscription-change
-        elif t == "subchg":
-            creator = cmd["creator"]
-            tg_list = [tg for tg,p in USER_PREFS.items() if creator in p.get("subscriptions", set())]
-            for tg in tg_list:
-                prefs = USER_PREFS[tg]
-                if prefs["silenced"]:
-                    MISSED_STORE.setdefault(tg, []).append(cmd)
-                else:
-                    text = (
-                        f"🔔 *{creator}* changed price:\n"
-                        f"• Old: `{cmd['old_price']}` → New: `{cmd['new_price']}`"
-                    )
-                    kb = InlineKeyboardMarkup([[InlineKeyboardButton("▶️ View", url=f"https://example.com/{creator}")]])
-                    await context.bot.send_message(chat_id=tg, text=text, reply_markup=kb, parse_mode="Markdown")
-        # DM alert
-        elif t == "dm":
-            nyx_id = str(cmd["nyx_id"])
-            tg     = get_telegram_id(nyx_id)
-            prefs  = USER_PREFS.setdefault(tg, {"silenced": False, "subscriptions": set()})
-            if not tg or prefs["silenced"]:
-                new_q.append(cmd)
-                continue
-
-            text = f"✉️ *{cmd['creator']}* — “{cmd['message']}”"
-            kb = InlineKeyboardMarkup([[
-                InlineKeyboardButton("🔕 Mute", callback_data=f"toggle_mute|{nyx_id}|{cmd['creator']}"),
-                InlineKeyboardButton("↩️ Reply", callback_data=f"reply_dm|{nyx_id}|{cmd['creator']}")
-            ]])
-            await context.bot.send_message(chat_id=tg, text=text, reply_markup=kb, parse_mode="Markdown")
-
-        else:
-            new_q.append(cmd)
+        if c["type"] in ("relay","subchg","digest_daily","digest_weekly"):
+            new_q.append(c)
 
     write_queue(new_q)
 
+async def show_alerts(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+    tg   = update.effective_user.id
+    msg  = update.callback_query.message
 
-# ─── Bot Commands ────────────────────────────────────────
+    queue  = read_queue()
+    alerts = [
+        c for c in queue
+        if c["type"] in ("relay", "subchg")
+        and get_telegram_id(str(c["nyx_id"])) == tg
+    ]
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    tg = update.effective_user.id
-    display = update.effective_user.username or update.effective_user.full_name or "Unknown"
-    nyx_id = register_user(tg, display)
-    USER_PREFS.setdefault(tg, {"silenced": False, "subscriptions": set()})
-    await update.message.reply_text(f"👋 You are NYX ID #{nyx_id}. Type /menu for commands.")
+    if not alerts:
+        await msg.reply_text("🔔 No pending alerts.")
+        return
 
-async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "⭐ *Commands* ⭐\n"
-        "/start         – onboard\n"
-        "/subscribe     – subscribe to a creator\n"
-        "/unsubscribe   – unsubscribe from a creator\n"
-        "/subscriptions – list your subscriptions\n"
-        "/silence       – pause alerts\n"
-        "/unsilence     – resume alerts & show digest",
-        parse_mode="Markdown"
-    )
-
-async def subscribe(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    tg = update.effective_user.id
-    creator = " ".join(context.args).strip()
-    prefs = USER_PREFS.setdefault(tg, {"silenced": False, "subscriptions": set()})
-    prefs["subscriptions"].add(creator)
-    await update.message.reply_text(f"✅ Subscribed to *{creator}*", parse_mode="Markdown")
-
-async def unsubscribe(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    tg = update.effective_user.id
-    creator = " ".join(context.args).strip()
-    prefs = USER_PREFS.setdefault(tg, {"silenced": False, "subscriptions": set()})
-    prefs["subscriptions"].discard(creator)
-    await update.message.reply_text(f"🚫 Unsubscribed from *{creator}*", parse_mode="Markdown")
-
-async def list_subscriptions(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    tg = update.effective_user.id
-    subs = USER_PREFS.setdefault(tg, {"silenced": False, "subscriptions": set()})["subscriptions"]
-    if not subs:
-        await update.message.reply_text("You have no subscriptions.")
-    else:
-        await update.message.reply_text(
-            "⭐ *Your subscriptions:*  \n" + "\n".join(f"• {c}" for c in sorted(subs)),
-            parse_mode="Markdown"
+    for c in alerts:
+        out = (
+            f"🆕 New post from *{c['creator']}*:\n{c['title']}\n{c['url']}"
+            if c["type"] == "relay"
+            else f"💲 Price update by *{c['creator']}*:\n{c['old_price']} → {c['new_price']}"
         )
+        await msg.reply_text(out, parse_mode="Markdown")
 
-async def silence(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    tg = update.effective_user.id
-    USER_PREFS.setdefault(tg, {"silenced": False, "subscriptions": set()})["silenced"] = True
-    await update.message.reply_text("🔇 Notifications paused. Use /unsilence to catch up.")
+    remaining = [
+        c for c in queue
+        if not (
+            c["type"] in ("relay", "subchg")
+            and get_telegram_id(str(c["nyx_id"])) == tg
+        )
+    ]
+    write_queue(remaining)
 
-async def unsilence(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    tg = update.effective_user.id
-    prefs = USER_PREFS.setdefault(tg, {"silenced": False, "subscriptions": set()})
-    prefs["silenced"] = False
+    try:
+        await msg.delete()
+    except:
+        pass
 
-    missed = MISSED_STORE.pop(tg, [])
-    if missed:
-        lines = ["📬 *Missed Notifications*"]
-        posts = [m for m in missed if m["type"] == "relay"]
-        subs  = [m for m in missed if m["type"] == "subchg"]
-        dms   = [m for m in missed if m["type"] == "dm"]
+    new_text, new_kb = build_dashboard(tg)
+    new_msg = await context.bot.send_message(
+        chat_id=tg,
+        text=new_text,
+        parse_mode="Markdown",
+        reply_markup=new_kb
+    )
+    ALL_DASH_MSGS[tg] = [new_msg.message_id]
 
-        if posts:
-            lines.append("\n*Posts:*")
-            for m in posts:
-                lines.append(f"• New post from *{m['creator']}* [View]")
-        if subs:
-            lines.append("\n*Price Changes:*")
-            for m in subs:
-                lines.append(f"• *{m['creator']}*: `{m['old_price']}` → `{m['new_price']}` [View]")
-        if dms:
-            lines.append("\n*DMs:*")
-            for m in dms:
-                lines.append(f"• New DM from *{m['creator']}* [View]")
+async def show_digest(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+    tg  = update.effective_user.id
+    msg = update.callback_query.message
 
-        await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+    queue  = read_queue()
+    alerts = [
+        c for c in queue
+        if c["type"] in ("relay", "subchg")
+        and get_telegram_id(str(c["nyx_id"])) == tg
+    ]
 
-    await update.message.reply_text("🔔 Notifications resumed.")
+    if not alerts:
+        await msg.reply_text("🔔 No pending alerts.")
+        return
 
-# register handlers
+    for c in alerts:
+        out = (
+            f"🆕 New post from *{c['creator']}*:\n{c['title']}\n{c['url']}"
+            if c["type"] == "relay"
+            else f"💲 Price update by *{c['creator']}*:\n{c['old_price']} → {c['new_price']}"
+        )
+        await msg.reply_text(out, parse_mode="Markdown")
+
+    try:
+        await msg.delete()
+    except:
+        pass
+
+async def show_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+    await update.callback_query.message.reply_text("⚙️ Settings are not yet configurable.")
+
+# handlers & schedule
 app.add_handler(CommandHandler("start", start))
-app.add_handler(CommandHandler("menu", menu))
-app.add_handler(CommandHandler("subscribe", subscribe))
-app.add_handler(CommandHandler("unsubscribe", unsubscribe))
-app.add_handler(CommandHandler("subscriptions", list_subscriptions))
-app.add_handler(CommandHandler("silence", silence))
-app.add_handler(CommandHandler("unsilence", unsilence))
-app.add_handler(CallbackQueryHandler(lambda *args, **kwargs: None))
-app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, lambda u,c: None))
-
-# schedule processing
-jobq = app.job_queue
-jobq.run_repeating(process_relay_commands, interval=2.0, first=2.0)
+app.add_handler(CallbackQueryHandler(show_alerts, pattern="^show_alerts$"))
+app.add_handler(CallbackQueryHandler(show_digest, pattern="^view_digest$"))
+app.add_handler(CallbackQueryHandler(show_settings, pattern="^show_settings$"))
+app.job_queue.run_repeating(process_relay_commands, interval=2.0, first=2.0)
 
 print("🤖 NyxFanBot is live.")
 app.run_polling()
