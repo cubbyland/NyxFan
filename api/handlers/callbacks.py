@@ -1,7 +1,8 @@
 # cubbyland-nyxfan/api/handlers/callbacks.py
 
 from io import BytesIO
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from typing import Optional
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto
 from telegram.ext import ContextTypes
 
 from api.utils.io import read_queue, write_queue, read_notifs, write_notifs
@@ -11,12 +12,24 @@ from shared.fan_registry import get_telegram_id
 
 
 # ───────────────────────────────────────────────
+# Unlock payload cache (filled by fan refresh worker via `unlock_register`)
+# key: content_id (str) → payload (any structure your proxy enqueued)
+# ───────────────────────────────────────────────
+UNLOCK_STORE: dict[str, dict] = {}
+
+
+# ───────────────────────────────────────────────
 # Helpers to render the same post component used by Proxy
 # ───────────────────────────────────────────────
-def _relay_keyboard(creator: str) -> InlineKeyboardMarkup:
+def _relay_keyboard(creator: str, content_id: Optional[str] = None) -> InlineKeyboardMarkup:
+    """
+    If a content_id is known, bake it into Unlock callback so we can confirm & deliver.
+    Fallback to plain 'unlock' if not present (older relays).
+    """
+    unlock_cb = f"unlock|{content_id}" if content_id else "unlock"
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("Settings", callback_data=f"settings|{creator}"),
-         InlineKeyboardButton("Unlock",   callback_data="unlock")]
+         InlineKeyboardButton("Unlock",   callback_data=unlock_cb)]
     ])
 
 def _looks_hex(s: str) -> bool:
@@ -35,13 +48,14 @@ async def _send_relay_from_queue(update_msg, tg: int, cmd: dict):
     creator = cmd.get("creator", "?")
     title   = cmd.get("title", "")
     img     = cmd.get("image") or cmd.get("image_hex") or cmd.get("file_id")
+    content_id = cmd.get("content_id")  # OPTIONAL
 
     # If it's a TG file_id, send directly
     if isinstance(img, str) and _looks_file_id(img):
         await update_msg.reply_photo(
             photo=img,
             caption=f"🔥 New post from #{creator}:\n\n{title}",
-            reply_markup=_relay_keyboard(creator),
+            reply_markup=_relay_keyboard(creator, content_id),
         )
         return
 
@@ -54,7 +68,7 @@ async def _send_relay_from_queue(update_msg, tg: int, cmd: dict):
             await update_msg.reply_photo(
                 photo=bio,
                 caption=f"🔥 New post from #{creator}:\n\n{title}",
-                reply_markup=_relay_keyboard(creator),
+                reply_markup=_relay_keyboard(creator, content_id),
             )
             return
         except Exception:
@@ -64,7 +78,7 @@ async def _send_relay_from_queue(update_msg, tg: int, cmd: dict):
     await update_msg.reply_text(
         f"🆕 New post from *#{creator}*:\n{title}",
         parse_mode="Markdown",
-        reply_markup=_relay_keyboard(creator),
+        reply_markup=_relay_keyboard(creator, content_id),
     )
 
 
@@ -199,6 +213,174 @@ async def show_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ───────────────────────────────────────────────
+# Unlock flow (confirmation → deliver)
+# ───────────────────────────────────────────────
+def _cap_key(chat_id: int, msg_id: int) -> str:
+    return f"{chat_id}:{msg_id}"
+
+def _confirm_keyboard(creator: str, content_id: Optional[str]) -> InlineKeyboardMarkup:
+    if content_id:
+        return InlineKeyboardMarkup([
+            [InlineKeyboardButton("✅ Confirm", callback_data=f"unlock_confirm|{content_id}")],
+            [InlineKeyboardButton("⬅ Back",    callback_data=f"back|{creator}")]
+        ])
+    # No content id known → only back
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("⬅ Back", callback_data=f"back|{creator}")]
+    ])
+
+async def unlock_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    When user taps Unlock: swap the caption to a confirmation panel.
+    Callback data formats supported:
+      - "unlock"                    (no content id; older cards)
+      - "unlock|<content_id>"       (preferred)
+    """
+    q = update.callback_query
+    await q.answer()
+
+    chat_id = q.message.chat_id
+    msg_id  = q.message.message_id
+    k = _cap_key(chat_id, msg_id)
+
+    # store original caption once so Back works
+    if k not in ORIG_CAPTION:
+        ORIG_CAPTION[k] = q.message.caption or ""
+
+    # extract creator from original caption if present
+    creator = "?"
+    cap = q.message.caption or ""
+    # expects "New post from #Creator" format
+    if "# " in cap:  # very defensive (unlikely)
+        pass
+    else:
+        # cheap parse: find first '#'
+        hash_idx = cap.find("#")
+        if hash_idx != -1:
+            # collect until whitespace or newline
+            j = hash_idx + 1
+            name = []
+            while j < len(cap) and cap[j] not in (" ", "\n", "\t", ":", "—"):
+                name.append(cap[j]); j += 1
+            if name:
+                creator = "".join(name)
+
+    # parse optional content_id
+    try:
+        parts = q.data.split("|", 1)
+        content_id = parts[1] if len(parts) == 2 else None
+    except Exception:
+        content_id = None
+
+    text = (
+        f"🔓 *Unlock full content from #{creator}?*\n\n"
+        "You’ll receive the full drop here. Continue?"
+    )
+    try:
+        await q.message.edit_caption(
+            caption=text,
+            parse_mode="Markdown",
+            reply_markup=_confirm_keyboard(creator, content_id),
+        )
+    except Exception as e:
+        print(f"[NyxFan] unlock confirm edit failed: {e!r}")
+
+async def unlock_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Deliver the cached unlock payload. Supports simple structures:
+      { "text": "...", "images": [<hex|file_id>...] }
+    Extend as needed to match your proxy's `unlock_register` payloads.
+    """
+    q = update.callback_query
+    await q.answer()
+
+    # extract content_id
+    content_id = None
+    try:
+        _, content_id = q.data.split("|", 1)
+    except Exception:
+        pass
+
+    if not content_id or content_id not in UNLOCK_STORE:
+        await q.message.reply_text("⚠️ This content isn’t ready yet.")
+        # go back to original card if we can
+        try:
+            orig = ORIG_CAPTION.get(_cap_key(q.message.chat_id, q.message.message_id)) or "🔥 New post"
+            await q.message.edit_caption(caption=orig)
+        except Exception:
+            pass
+        return
+
+    payload = UNLOCK_STORE.get(content_id, {})
+
+    # 1) Acknowledge & restore original post UI
+    try:
+        await q.message.edit_caption(
+            caption="✅ Unlocked. Sending content…"
+        )
+    except Exception:
+        pass
+
+    # 2) Deliver content
+    text = payload.get("text")
+    images = payload.get("images") or payload.get("media") or []
+
+    if isinstance(text, str) and text.strip():
+        try:
+            await context.bot.send_message(chat_id=q.message.chat_id, text=text)
+        except Exception as e:
+            print(f"[NyxFan] unlock text send failed: {e!r}")
+
+    # send up to 10 images (Telegram album limit)
+    sendables = []
+    for item in images[:10]:
+        if isinstance(item, str) and _looks_file_id(item):
+            sendables.append(InputMediaPhoto(media=item))
+        elif isinstance(item, str) and _looks_hex(item):
+            try:
+                bio = BytesIO(bytes.fromhex(item)); bio.name = "unlock.jpg"
+                sendables.append(InputMediaPhoto(media=bio))
+            except Exception:
+                pass
+
+    try:
+        if len(sendables) == 1:
+            # single item → sendPhoto
+            m = sendables[0]
+            await context.bot.send_photo(chat_id=q.message.chat_id, photo=m.media)
+        elif len(sendables) > 1:
+            # album
+            await context.bot.send_media_group(chat_id=q.message.chat_id, media=sendables)
+    except Exception as e:
+        print(f"[NyxFan] unlock media send failed: {e!r}")
+
+    # 3) Optional: clean up the confirmation caption back to original
+    try:
+        orig = ORIG_CAPTION.get(_cap_key(q.message.chat_id, q.message.message_id)) or "🔥 New post"
+        await q.message.edit_caption(caption=orig)
+    except Exception:
+        pass
+
+async def back_to_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    _, creator = q.data.split("|", 1)
+    chat_id = q.message.chat_id
+    msg_id  = q.message.message_id
+    k = _cap_key(chat_id, msg_id)
+
+    original = ORIG_CAPTION.get(k) or "🔥 New post"
+    try:
+        await q.message.edit_caption(
+            caption=original,
+            reply_markup=_original_keyboard(creator),
+        )
+    except Exception as e:
+        print(f"[NyxFan] back edit failed: {e!r}")
+    # keep ORIG_CAPTION[k] around in case user opens settings again
+
+
+# ───────────────────────────────────────────────
 # Per-post Settings panel (edits the photo caption only) — original logic kept
 # ───────────────────────────────────────────────
 def _safe_notifs_store() -> dict:
@@ -271,8 +453,6 @@ def _original_keyboard(creator: str) -> InlineKeyboardMarkup:
          InlineKeyboardButton("Unlock",   callback_data="unlock")]
     ])
 
-def _cap_key(chat_id: int, msg_id: int) -> str:
-    return f"{chat_id}:{msg_id}"
 
 async def show_settings_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
@@ -346,21 +526,3 @@ async def toggle_mute(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="Markdown",
         reply_markup=_settings_keyboard(creator, prefs),
     )
-
-async def back_to_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query
-    await q.answer()
-    _, creator = q.data.split("|", 1)
-    chat_id = q.message.chat_id
-    msg_id  = q.message.message_id
-    k = _cap_key(chat_id, msg_id)
-
-    original = ORIG_CAPTION.get(k) or "🔥 New post"
-    try:
-        await q.message.edit_caption(
-            caption=original,
-            reply_markup=_original_keyboard(creator),
-        )
-    except Exception as e:
-        print(f"[NyxFan] back edit failed: {e!r}")
-    # keep ORIG_CAPTION[k] around in case user opens settings again

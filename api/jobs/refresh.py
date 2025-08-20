@@ -13,6 +13,24 @@ from api.handlers.dashboard import build_dashboard
 from shared.fan_registry import get_telegram_id
 
 
+def _resolve_tg_from_any(nyx_or_tg) -> int | None:
+    """
+    Accept either a canonical NYX ID (string) or a raw Telegram user id.
+    1) Try NYX→TG via registry
+    2) Fallback: if it's a numeric string that looks like a TG id, use it directly
+    """
+    tg = get_telegram_id(str(nyx_or_tg))
+    if tg:
+        return tg
+    s = str(nyx_or_tg or "").strip()
+    if s.isdigit() and len(s) >= 9:  # typical TG user-id length
+        try:
+            return int(s)
+        except Exception:
+            return None
+    return None
+
+
 async def _edit_dashboard_if_exists(context: ContextTypes.DEFAULT_TYPE, tg: int) -> bool:
     """Background-safe update: edit existing dashboard only (no new message)."""
     mids = ALL_DASH_MSGS.get(tg, [])
@@ -35,18 +53,19 @@ async def process_fan_queue(context: ContextTypes.DEFAULT_TYPE):
     new_q = []
     for cmd in queue:
         t = cmd.get("type")
-        tg = get_telegram_id(str(cmd.get("nyx_id")))
-        if not tg:
+        # Only handle dash_refresh here; everything else stays in the queue
+        if t != "dash_refresh":
             new_q.append(cmd)
             continue
 
-        if t == "dash_refresh":
-            # Background-safe: edit existing dashboard only; if none, skip (avoid push).
-            await _edit_dashboard_if_exists(context, tg)
-            # Do not requeue this poke.
+        tg = _resolve_tg_from_any(cmd.get("nyx_id"))
+        if not tg:
+            # Can't map yet; keep it so it can be retried on a later tick
+            new_q.append(cmd)
             continue
 
-        # Leave all other items untouched for Proxy (or future handling)
-        new_q.append(cmd)
+        # Background-safe: edit existing dashboard only; if none, skip (avoid push).
+        await _edit_dashboard_if_exists(context, tg)
+        # Do not requeue this poke.
 
     write_queue(new_q)

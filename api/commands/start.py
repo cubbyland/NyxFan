@@ -37,7 +37,7 @@ async def _send_relay_from_queue(bot_msg, cmd: dict):
     if isinstance(img, str) and _looks_file_id(img):
         await bot_msg.reply_photo(
             photo=img,
-            caption=f"🔥 New post from {creator}:\n\n{title}",
+            caption=f"🔥 New post from #{creator}:\n\n{title}",
             reply_markup=_relay_keyboard(creator),
         )
         return
@@ -48,7 +48,7 @@ async def _send_relay_from_queue(bot_msg, cmd: dict):
             bio = BytesIO(b); bio.name = "post.jpg"
             await bot_msg.reply_photo(
                 photo=bio,
-                caption=f"🔥 New post from {creator}:\n\n{title}",
+                caption=f"🔥 New post from #{creator}:\n\n{title}",
                 reply_markup=_relay_keyboard(creator),
             )
             return
@@ -56,7 +56,7 @@ async def _send_relay_from_queue(bot_msg, cmd: dict):
             pass
 
     await bot_msg.reply_text(
-        f"🆕 New post from *{creator}*:\n{title}",
+        f"🆕 New post from #*{creator}*:\n{title}",
         parse_mode="Markdown",
         reply_markup=_relay_keyboard(creator),
     )
