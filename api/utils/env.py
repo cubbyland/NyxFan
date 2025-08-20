@@ -5,21 +5,26 @@ import sys
 from dotenv import load_dotenv
 from telegram.ext import Application
 
-# Ensure project root (that contains `api/` and `shared/`) is importable
-# env.py lives at: <project_root>/api/utils/env.py
+# Ensure both the NyxFan project root (that contains `api/`) AND the
+# repository root (that contains `shared/`) are importable.
+# env.py lives at: <NyxFan>/api/utils/env.py
 _HERE = Path(__file__).resolve()
-PROJECT_ROOT = _HERE.parents[2]  # -> <project_root>
+PROJECT_ROOT = _HERE.parents[2]          # -> <NyxFan>
+REPO_ROOT    = PROJECT_ROOT.parents[0]   # -> repo root that should contain `shared/`
+
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
-# Load .env from <project_root>/.env
+# Load .env from <NyxFan>/.env (same as original single-file setup)
 load_dotenv(dotenv_path=PROJECT_ROOT / ".env")
 
 # Read required Fan bot config
 BOT_TOKEN    = os.getenv("BOT_TOKEN")
 BOT_USERNAME = os.getenv("BOT_USERNAME")
 
-# Optional URLs with sane defaults
+# Optional URLs with sane defaults (kept even though current dashboard omits them)
 INBOX_URL   = os.getenv("INBOX_URL", "https://example.com/inbox")
 PROFILE_URL = os.getenv("PROFILE_URL", "https://example.com/profile")
 
