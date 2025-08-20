@@ -1,19 +1,19 @@
-# NyxFan/api/utils/dashboard.py
-
+# NyxFan/api/handlers/dashboard.py
 from typing import Tuple
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
-from .helpers import read_queue, get_telegram_id, USER_DISP
+from api.utils.io import read_queue
+from api.utils.state import USER_DISP
+from api.utils.env import BOT_USERNAME
+from shared.fan_registry import get_telegram_id
 
 
-def build_dashboard(
-    tg_id: int,
-    bot_username: str,
-    inbox_url: str,
-    profile_url: str,
-) -> Tuple[str, InlineKeyboardMarkup]:
+def build_dashboard(tg_id: int) -> Tuple[str, InlineKeyboardMarkup]:
     """
     Build the dashboard text + inline keyboard for a given Telegram user id.
+    EXACTLY matches original functionality:
+      - shows pending counts grouped by creator
+      - ONLY shows "View All" and "Settings" buttons (no Inbox/Profile)
     """
     disp = USER_DISP.get(tg_id, str(tg_id))
     header = f"{disp}’s Dashboard"
@@ -38,24 +38,19 @@ def build_dashboard(
         for creator, cnts in summary.items():
             parts: list[str] = []
             if cnts["posts"]:
-                url = f"https://t.me/{bot_username}?start=filter_relay_{creator}"
+                url = f"https://t.me/{BOT_USERNAME}?start=filter_relay_{creator}"
                 parts.append(f"[{cnts['posts']} post{'s' if cnts['posts']>1 else ''}]({url})")
             if cnts["prices"]:
-                url = f"https://t.me/{bot_username}?start=filter_subchg_{creator}"
+                url = f"https://t.me/{BOT_USERNAME}?start=filter_subchg_{creator}"
                 parts.append(f"[{cnts['prices']} price update{'s' if cnts['prices']>1 else ''}]({url})")
             lines.append(f"#{creator}: " + " | ".join(parts))
         body = "\n".join(lines)
     else:
         body = "🔔 No pending alerts."
 
+    # EXACT button layout from original:
     kb = InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("View All", callback_data="show_alerts"),
-            InlineKeyboardButton("Inbox", url=inbox_url),
-        ],
-        [
-            InlineKeyboardButton("Profile", url=profile_url),
-            InlineKeyboardButton("Settings", callback_data="show_settings"),
-        ],
+        [InlineKeyboardButton("View All", callback_data="show_alerts")],
+        [InlineKeyboardButton("Settings", callback_data="show_settings")],
     ])
     return f"{header}\n\n{body}", kb

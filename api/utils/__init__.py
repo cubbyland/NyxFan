@@ -1,27 +1,22 @@
 # NyxFan/api/utils/__init__.py
 """
 Utilities for NyxFan:
-- env        → Application + config (BOT_USERNAME, INBOX_URL, PROFILE_URL)
-- helpers    → queue I/O + simple in-memory state + shared registry re-exports
-- dashboard  → dashboard text + keyboard builder
+- env        → Application + config
+- errors     → minimal error handler
+- io         → shared queue I/O
+- state      → in-memory runtime dicts
+(We intentionally do NOT import dashboard here to avoid circular imports.)
 """
 
 from .env import app, BOT_USERNAME, INBOX_URL, PROFILE_URL
-from .helpers import (
-    QUEUE_PATH,
-    read_queue, write_queue,
-    register_user, get_telegram_id,
-    ALL_DASH_MSGS, USER_DISP,
-)
-from .dashboard import build_dashboard
+from .errors import on_error
+from .io import read_queue, write_queue
+from .state import ALL_DASH_MSGS, USER_DISP
 
 __all__ = [
-    # env
-    "app", "BOT_USERNAME", "INBOX_URL", "PROFILE_URL",
-    # helpers
-    "QUEUE_PATH", "read_queue", "write_queue",
-    "register_user", "get_telegram_id",
+    "app",
+    "BOT_USERNAME", "INBOX_URL", "PROFILE_URL",
+    "on_error",
+    "read_queue", "write_queue",
     "ALL_DASH_MSGS", "USER_DISP",
-    # dashboard
-    "build_dashboard",
 ]

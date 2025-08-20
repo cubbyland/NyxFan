@@ -2,7 +2,7 @@
 """
 Handler registration for NyxFan.
 Exposes:
-- register_all_handlers → attaches commands and callback query handlers
+- register_handlers → attaches commands and callback query handlers
 """
 
 from .callbacks import show_alerts, show_digest, show_settings
@@ -13,13 +13,14 @@ __all__ = [
     "show_digest",
     "show_settings",
     "setup_error_handler",
-    "register_all_handlers",
+    "register_handlers",
 ]
 
 
-def register_all_handlers(app):
+def register_handlers(app):
     """
     Register all handlers (commands + callbacks) for NyxFan.
+    Mirrors the wiring from the original single-file index.py.
     """
     from api.commands import start
     from telegram.ext import CommandHandler, CallbackQueryHandler
@@ -28,8 +29,8 @@ def register_all_handlers(app):
     app.add_handler(CommandHandler("start", start))
 
     # Callback query handlers
-    app.add_handler(CallbackQueryHandler(show_alerts, pattern="^show_alerts$"))
-    app.add_handler(CallbackQueryHandler(show_digest, pattern="^view_digest$"))
+    app.add_handler(CallbackQueryHandler(show_alerts,  pattern="^show_alerts$"))
+    app.add_handler(CallbackQueryHandler(show_digest,  pattern="^view_digest$"))
     app.add_handler(CallbackQueryHandler(show_settings, pattern="^show_settings$"))
 
     # Error handler

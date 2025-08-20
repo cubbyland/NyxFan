@@ -1,12 +1,9 @@
 # NyxFan/api/commands/start.py
 from __future__ import annotations
 
-import json
-from pathlib import Path
 from telegram import Update
 from telegram.ext import ContextTypes
 
-from api.utils.env import BOT_USERNAME, INBOX_URL, PROFILE_URL
 from api.utils.io import read_queue, write_queue
 from api.utils.state import USER_DISP, ALL_DASH_MSGS
 from api.handlers.dashboard import build_dashboard
@@ -43,10 +40,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for c in queue:
             try:
                 if (
-                    get_telegram_id(str(c["nyx_id"])) == tg
-                    and c["type"] in ("relay", "subchg")
+                    get_telegram_id(str(c.get("nyx_id"))) == tg
+                    and c.get("type") in ("relay", "subchg")
+                    and len(arg.split("_", 2)) == 3
                     and arg.split("_", 2)[1] == c["type"]
-                    and c["creator"] == arg.split("_", 2)[2]
+                    and c.get("creator") == arg.split("_", 2)[2]
                 ):
                     to_send.append(c)
                 else:
@@ -57,9 +55,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         for c in to_send:
             text = (
-                f"🆕 New post from *{c['creator']}*:\n{c['title']}\n{c.get('url','')}".rstrip()
+                f"🆕 New post from *{c['creator']}*:\n{c.get('title','')}\n{c.get('url','')}".rstrip()
                 if c["type"] == "relay"
-                else f"💲 Price update by *{c['creator']}*:\n{c['old_price']} → {c['new_price']}"
+                else f"💲 Price update by *{c['creator']}*:\n{c.get('old_price','?')} → {c.get('new_price','?')}"
             )
             await update.message.reply_text(text, parse_mode="Markdown")
 

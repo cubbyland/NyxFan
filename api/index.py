@@ -6,7 +6,7 @@ Wires together:
 - utils.env        → builds `app`
 - utils.errors     → global error handler
 - handlers.*       → /start and UI callbacks
-- jobs.refresh     → background job to process dash refresh pings
+- jobs.refresh     → background job to process dash refresh pings (ONLY)
 """
 
 # --- Import path bootstrap: ensure the directory that CONTAINS 'api/' is on sys.path
@@ -21,7 +21,7 @@ if str(_PROJECT_ROOT) not in _sys.path:
 from api.utils.env import app
 from api.utils.errors import on_error
 from api.handlers import register_handlers
-from api.jobs.refresh import process_dash_refreshes
+from api.jobs.refresh import process_fan_queue
 
 # Error handler
 app.add_error_handler(on_error)
@@ -29,12 +29,12 @@ app.add_error_handler(on_error)
 # Register all bot handlers (commands + callbacks)
 register_handlers(app)
 
-# Background job: process queued "dash_refresh" pings so dashboards stay current
-print("[NyxFan] scheduling dash_refresh worker…")
+# Fan-side background consumer (only dash_refresh edits)
+print("[NyxFan] scheduling fan dash_refresh worker…")
 app.job_queue.run_repeating(
-    process_dash_refreshes,
-    interval=10.0,   # tune as needed
-    first=3.0,
+    process_fan_queue,
+    interval=3.0,
+    first=2.0,
     name="fan_dash_refresh",
     job_kwargs={
         "max_instances": 1,
@@ -42,7 +42,7 @@ app.job_queue.run_repeating(
         "misfire_grace_time": 60,
     },
 )
-print("[NyxFan] dash_refresh worker scheduled.")
+print("[NyxFan] fan dash_refresh worker scheduled.")
 
 if __name__ == "__main__":
     print("🤖  NyxFan is live. (polling)")
