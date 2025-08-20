@@ -1,7 +1,8 @@
-# NyxFan/api/commands/start.py
+# cubbyland-nyxfan/api/commands/start.py
 from __future__ import annotations
 
-from telegram import Update
+from io import BytesIO
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 
 from api.utils.io import read_queue, write_queue
@@ -10,11 +11,62 @@ from api.handlers.dashboard import build_dashboard
 from shared.fan_registry import register_user, get_telegram_id
 
 
+def _relay_keyboard(creator: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("Settings", callback_data=f"settings|{creator}"),
+         InlineKeyboardButton("Unlock",   callback_data="unlock")]
+    ])
+
+def _looks_hex(s: str) -> bool:
+    if not isinstance(s, str) or len(s) % 2 != 0:
+        return False
+    try:
+        int(s, 16)
+        return True
+    except Exception:
+        return False
+
+def _looks_file_id(s: str) -> bool:
+    return isinstance(s, str) and len(s) > 40 and s.startswith(("AgAC", "BQAC", "CAAC", "DQAC", "EAAC", "GAAC", "IAAC"))
+
+async def _send_relay_from_queue(bot_msg, cmd: dict):
+    creator = cmd.get("creator", "?")
+    title   = cmd.get("title", "")
+    img     = cmd.get("image") or cmd.get("image_hex") or cmd.get("file_id")
+
+    if isinstance(img, str) and _looks_file_id(img):
+        await bot_msg.reply_photo(
+            photo=img,
+            caption=f"🔥 New post from {creator}:\n\n{title}",
+            reply_markup=_relay_keyboard(creator),
+        )
+        return
+
+    if isinstance(img, str) and _looks_hex(img):
+        try:
+            b = bytes.fromhex(img)
+            bio = BytesIO(b); bio.name = "post.jpg"
+            await bot_msg.reply_photo(
+                photo=bio,
+                caption=f"🔥 New post from {creator}:\n\n{title}",
+                reply_markup=_relay_keyboard(creator),
+            )
+            return
+        except Exception:
+            pass
+
+    await bot_msg.reply_text(
+        f"🆕 New post from *{creator}*:\n{title}",
+        parse_mode="Markdown",
+        reply_markup=_relay_keyboard(creator),
+    )
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     /start entry:
       - registers fan
-      - enqueues a 'joined' command so Proxy knows about the user
+      - enqueues a 'joined' command so Proxy knows about the user (informational)
       - supports deep-link filters (?start=filter_<type>_<creator>)
       - sends/refreshes the dashboard
     """
@@ -23,16 +75,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     register_user(tg, disp)
     USER_DISP[tg] = disp
 
-    # Notify NyxProxy via the shared queue that this fan joined
+    # (Informational) Let Proxy know this fan exists
     queue = read_queue()
-    queue.append({
-        "type": "joined",
-        "nyx_id": str(tg),
-        "display": disp
-    })
+    queue.append({"type": "joined", "nyx_id": str(tg), "display": disp})
     write_queue(queue)
 
-    # Deep-link filter handling, e.g. start=filter_relay_<creator> or filter_subchg_<creator>
+    # Deep-link filter handling
     if context.args:
         arg = context.args[0]
         queue = read_queue()
@@ -41,7 +89,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             try:
                 if (
                     get_telegram_id(str(c.get("nyx_id"))) == tg
-                    and c.get("type") in ("relay", "subchg")
+                    and c.get("type") in ("relay", "subchg", "dm")
                     and len(arg.split("_", 2)) == 3
                     and arg.split("_", 2)[1] == c["type"]
                     and c.get("creator") == arg.split("_", 2)[2]
@@ -54,12 +102,19 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         write_queue(kept)
 
         for c in to_send:
-            text = (
-                f"🆕 New post from *{c['creator']}*:\n{c.get('title','')}\n{c.get('url','')}".rstrip()
-                if c["type"] == "relay"
-                else f"💲 Price update by *{c['creator']}*:\n{c.get('old_price','?')} → {c.get('new_price','?')}"
-            )
-            await update.message.reply_text(text, parse_mode="Markdown")
+            t = c.get("type")
+            if t == "relay":
+                await _send_relay_from_queue(update.message, c)
+            elif t == "dm":
+                await update.message.reply_text(
+                    f"✉️ DM from *{c.get('creator','?')}*:\n{c.get('message','')}",
+                    parse_mode="Markdown"
+                )
+            else:
+                await update.message.reply_text(
+                    f"💲 Price update by *{c.get('creator','?')}*:\n{c.get('old_price','?')} → {c.get('new_price','?')}",
+                    parse_mode="Markdown"
+                )
 
     # Send a fresh dashboard
     text, kb = build_dashboard(tg)

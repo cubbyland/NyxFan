@@ -1,4 +1,6 @@
-# NyxFan/api/handlers/callbacks.py
+# cubbyland-nyxfan/api/handlers/callbacks.py
+
+from io import BytesIO
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 
@@ -9,7 +11,65 @@ from shared.fan_registry import get_telegram_id
 
 
 # ───────────────────────────────────────────────
-# Existing dashboard handlers (unchanged)
+# Helpers to render the same post component used by Proxy
+# ───────────────────────────────────────────────
+def _relay_keyboard(creator: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("Settings", callback_data=f"settings|{creator}"),
+         InlineKeyboardButton("Unlock",   callback_data="unlock")]
+    ])
+
+def _looks_hex(s: str) -> bool:
+    if not isinstance(s, str) or len(s) % 2 != 0:
+        return False
+    try:
+        int(s, 16)
+        return True
+    except Exception:
+        return False
+
+def _looks_file_id(s: str) -> bool:
+    return isinstance(s, str) and len(s) > 40 and s.startswith(("AgAC", "BQAC", "CAAC", "DQAC", "EAAC", "GAAC", "IAAC"))
+
+async def _send_relay_from_queue(update_msg, tg: int, cmd: dict):
+    creator = cmd.get("creator", "?")
+    title   = cmd.get("title", "")
+    img     = cmd.get("image") or cmd.get("image_hex") or cmd.get("file_id")
+
+    # If it's a TG file_id, send directly
+    if isinstance(img, str) and _looks_file_id(img):
+        await update_msg.reply_photo(
+            photo=img,
+            caption=f"🔥 New post from #{creator}:\n\n{title}",
+            reply_markup=_relay_keyboard(creator),
+        )
+        return
+
+    # If it's hex → bytes
+    if isinstance(img, str) and _looks_hex(img):
+        try:
+            b = bytes.fromhex(img)
+            bio = BytesIO(b)
+            bio.name = "post.jpg"
+            await update_msg.reply_photo(
+                photo=bio,
+                caption=f"🔥 New post from #{creator}:\n\n{title}",
+                reply_markup=_relay_keyboard(creator),
+            )
+            return
+        except Exception:
+            pass
+
+    # Fallback to text if image can't be resolved
+    await update_msg.reply_text(
+        f"🆕 New post from *#{creator}*:\n{title}",
+        parse_mode="Markdown",
+        reply_markup=_relay_keyboard(creator),
+    )
+
+
+# ───────────────────────────────────────────────
+# Dashboard handlers (expanded: handle relay + subchg + dm, and send real cards)
 # ───────────────────────────────────────────────
 async def show_alerts(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
@@ -19,50 +79,80 @@ async def show_alerts(update: Update, context: ContextTypes.DEFAULT_TYPE):
     queue = read_queue()
     alerts = [
         c for c in queue
-        if c.get("type") in ("relay", "subchg")
+        if isinstance(c, dict)
+        and c.get("type") in ("relay", "subchg", "dm")
         and get_telegram_id(str(c.get("nyx_id"))) == tg
     ]
 
     if not alerts:
+        # 1) Tell the user
         await msg.reply_text("🔔 No pending alerts.")
+        # 2) Capture old dashboards BEFORE sending the new one
+        old_ids = ALL_DASH_MSGS.get(tg, [])
+        # 3) Send a fresh dashboard at the bottom
+        new_text, new_kb = build_dashboard(tg)
+        new_msg = await context.bot.send_message(
+            chat_id=tg,
+            text=new_text,
+            parse_mode="Markdown",
+            reply_markup=new_kb,
+        )
+        ALL_DASH_MSGS[tg] = [new_msg.message_id]
+        # 4) Now delete the old dashboards so the new one stays at the bottom
+        for mid in old_ids:
+            try:
+                await context.bot.delete_message(chat_id=tg, message_id=mid)
+            except Exception:
+                pass
     else:
+        # Have alerts → send them, then purge and rebuild dashboard (existing order OK)
         for c in alerts:
-            out = (
-                f"🆕 New post from *{c['creator']}*:\n{c.get('title','')}\n{c.get('url','')}"
-                if c["type"] == "relay"
-                else f"💲 Price update by *{c['creator']}*:\n{c.get('old_price','?')} → {c.get('new_price','?')}"
-            )
-            await msg.reply_text(out, parse_mode="Markdown")
+            t = c.get("type")
+            if t == "relay":
+                await _send_relay_from_queue(msg, tg, c)
+            elif t == "dm":
+                await msg.reply_text(
+                    f"✉️ DM from *#{c.get('creator','?')}*:\n{c.get('message','')}",
+                    parse_mode="Markdown"
+                )
+            else:  # subchg
+                await msg.reply_text(
+                    f"💲 Price update by *#{c.get('creator','?')}*:\n{c.get('old_price','?')} → {c.get('new_price','?')}",
+                    parse_mode="Markdown"
+                )
 
         remaining = [
             c for c in queue
             if not (
-                c.get("type") in ("relay", "subchg")
+                isinstance(c, dict)
+                and c.get("type") in ("relay", "subchg", "dm")
                 and get_telegram_id(str(c.get("nyx_id"))) == tg
             )
         ]
         write_queue(remaining)
 
+        # Delete old dashboards first (existing behavior), then send new
+        old_ids = ALL_DASH_MSGS.get(tg, [])
+        for mid in old_ids:
+            try:
+                await context.bot.delete_message(chat_id=tg, message_id=mid)
+            except Exception:
+                pass
+
+        new_text, new_kb = build_dashboard(tg)
+        new_msg = await context.bot.send_message(
+            chat_id=tg,
+            text=new_text,
+            parse_mode="Markdown",
+            reply_markup=new_kb,
+        )
+        ALL_DASH_MSGS[tg] = [new_msg.message_id]
+
+    # remove the "View All" button message
     try:
         await msg.delete()
     except Exception:
         pass
-
-    old_ids = ALL_DASH_MSGS.get(tg, [])
-    for mid in old_ids:
-        try:
-            await context.bot.delete_message(chat_id=tg, message_id=mid)
-        except Exception:
-            pass
-
-    new_text, new_kb = build_dashboard(tg)
-    new_msg = await context.bot.send_message(
-        chat_id=tg,
-        text=new_text,
-        parse_mode="Markdown",
-        reply_markup=new_kb,
-    )
-    ALL_DASH_MSGS[tg] = [new_msg.message_id]
 
 
 async def show_digest(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -73,7 +163,8 @@ async def show_digest(update: Update, context: ContextTypes.DEFAULT_TYPE):
     queue = read_queue()
     alerts = [
         c for c in queue
-        if c.get("type") in ("relay", "subchg")
+        if isinstance(c, dict)
+        and c.get("type") in ("relay", "subchg", "dm")
         and get_telegram_id(str(c.get("nyx_id"))) == tg
     ]
 
@@ -81,12 +172,19 @@ async def show_digest(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.reply_text("🔔 No pending alerts.")
     else:
         for c in alerts:
-            out = (
-                f"🆕 New post from *{c['creator']}*:\n{c.get('title','')}\n{c.get('url','')}"
-                if c["type"] == "relay"
-                else f"💲 Price update by *{c['creator']}*:\n{c.get('old_price','?')} → {c.get('new_price','?')}"
-            )
-            await msg.reply_text(out, parse_mode="Markdown")
+            t = c.get("type")
+            if t == "relay":
+                await _send_relay_from_queue(msg, tg, c)
+            elif t == "dm":
+                await msg.reply_text(
+                    f"✉️ DM from *#{c.get('creator','?')}*:\n{c.get('message','')}",
+                    parse_mode="Markdown"
+                )
+            else:
+                await msg.reply_text(
+                    f"💲 Price update by *#{c.get('creator','?')}*:\n{c.get('old_price','?')} → {c.get('new_price','?')}",
+                    parse_mode="Markdown"
+                )
 
     try:
         await msg.delete()
@@ -101,24 +199,36 @@ async def show_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ───────────────────────────────────────────────
-# New: Per-post Settings panel (edits the photo caption only)
+# Per-post Settings panel (edits the photo caption only) — original logic kept
 # ───────────────────────────────────────────────
+def _safe_notifs_store() -> dict:
+    """Always return a dict, never a list/None/etc."""
+    data = read_notifs()
+    return data if isinstance(data, dict) else {}
 
 def _notifs_get_for(tg_id: int, creator: str) -> dict:
-    data = read_notifs()
+    data = _safe_notifs_store()
     user = data.get(str(tg_id), {})
-    prefs = user.get(creator, {"mode": "immediate", "muted": False})
-    # sanity
-    if "mode" not in prefs:
-        prefs["mode"] = "immediate"
-    if "muted" not in prefs:
-        prefs["muted"] = False
+    if not isinstance(user, dict):
+        user = {}
+    prefs = user.get(creator, {})
+    if not isinstance(prefs, dict):
+        prefs = {}
+    # defaults
+    prefs.setdefault("mode", "immediate")
+    prefs.setdefault("muted", False)
     return prefs
 
 def _notifs_set_for(tg_id: int, creator: str, **updates):
-    data = read_notifs()
+    data = _safe_notifs_store()
     s = data.setdefault(str(tg_id), {})
+    if not isinstance(s, dict):
+        s = {}
+        data[str(tg_id)] = s
     prefs = s.setdefault(creator, {"mode": "immediate", "muted": False})
+    if not isinstance(prefs, dict):
+        prefs = {"mode": "immediate", "muted": False}
+        s[creator] = prefs
     prefs.update(updates)
     write_notifs(data)
 
@@ -129,12 +239,12 @@ def _settings_text(creator: str, prefs: dict) -> str:
     status = "🔇 *Muted*" if muted else "🔔 *Active*"
     freq = {
         "immediate": "Immediate (every post)",
-        "daily": "Daily digest",
-        "weekly": "Weekly digest",
+        "daily": "Daily Updates",
+        "weekly": "Weekly Updates",
     }.get(mode, "Immediate (every post)")
 
     lines = [
-        f"*Settings for #{creator}*",
+        f"*Notification Settings for #{creator}*",
         "",
         f"Status: {status}",
         f"Delivery: *{freq}*",
@@ -156,7 +266,7 @@ def _settings_keyboard(creator: str, prefs: dict) -> InlineKeyboardMarkup:
     ])
 
 def _original_keyboard(creator: str) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([  # [Settings] [Unlock]
+    return InlineKeyboardMarkup([
         [InlineKeyboardButton("Settings", callback_data=f"settings|{creator}"),
          InlineKeyboardButton("Unlock",   callback_data="unlock")]
     ])
@@ -194,7 +304,6 @@ async def show_settings_menu(update: Update, context: ContextTypes.DEFAULT_TYPE)
     try:
         await q.message.edit_caption(caption=text, parse_mode="Markdown", reply_markup=kb)
     except Exception as e:
-        # If edit fails (e.g. same content), still keep state; it's not critical
         print(f"[NyxFan] settings edit failed: {e!r}")
 
 async def set_daily(update: Update, context: ContextTypes.DEFAULT_TYPE):

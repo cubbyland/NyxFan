@@ -55,7 +55,7 @@ async def process_proxy_commands(context: ContextTypes.DEFAULT_TYPE):
                     await fan_bot.send_photo(
                         chat_id=tg,
                         photo=bio,
-                        caption=f"🔥 New post from {cmd['creator']}:\n\n{cmd['title']}"
+                        caption=f"🔥 New post from #{cmd['creator']}:\n\n{cmd['title']}"
                     )
                     print(f"[RELAY SENT] to {tg}")
                 else:

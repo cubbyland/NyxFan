@@ -24,13 +24,18 @@ def _write_text_atomic(path: Path, text: str):
 
 def read_queue():
     try:
-        return json.loads(QUEUE_PATH.read_text())
+        data = json.loads(QUEUE_PATH.read_text())
+        # queue must be a list; anything else → empty
+        return data if isinstance(data, list) else []
     except Exception:
         # If file doesn't exist or is unreadable, treat as empty queue
         return []
 
 
 def write_queue(q):
+    # force list on disk
+    if not isinstance(q, list):
+        q = []
     _write_text_atomic(QUEUE_PATH, json.dumps(q, indent=2))
 
 
@@ -43,14 +48,11 @@ def read_notifs() -> dict:
           "<creator>": { "mode": "immediate|daily|weekly", "muted": bool }
         }
       }
-    Any non-dict on disk (e.g., legacy []) is treated as {}.
+    Any non-dict on disk (e.g., legacy [], "", null) is treated as {}.
     """
     try:
         data = json.loads(NOTIF_PATH.read_text())
-        if isinstance(data, dict):
-            return data
-        # auto-heal: legacy content like [] → {}
-        return {}
+        return data if isinstance(data, dict) else {}
     except Exception:
         return {}
 
