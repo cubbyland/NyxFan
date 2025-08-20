@@ -12,4 +12,8 @@ ALL_DASH_MSGS: dict[int, list[int]] = {}
 # chat_id -> username/full_name/str(chat_id)
 USER_DISP: dict[int, str] = {}
 
-__all__ = ["ALL_DASH_MSGS", "USER_DISP"]
+# Remember original captions for per-post settings edits so "Back" can restore.
+# key "chat_id:message_id" -> caption text
+ORIG_CAPTION: dict[str, str] = {}
+
+__all__ = ["ALL_DASH_MSGS", "USER_DISP", "ORIG_CAPTION"]
