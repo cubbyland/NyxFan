@@ -63,23 +63,35 @@ async def _send_relay_from_queue(update_msg, tg: int, cmd: dict):
     if isinstance(img, str) and _looks_hex(img):
         try:
             b = bytes.fromhex(img)
-            bio = BytesIO(b)
-            bio.name = "post.jpg"
+            bio = BytesIO(b); bio.name = "post.jpg"
             await update_msg.reply_photo(
                 photo=bio,
                 caption=f"🔥 New post from #{creator}:\n\n{title}",
                 reply_markup=_relay_keyboard(creator, content_id),
             )
             return
-        except Exception:
-            pass
+        except Exception as e:
+            err = f"hex->bytes failed: {e!r}"
+    else:
+        err = "unusable image payload (no valid file_id/hex)"
 
-    # Fallback to text if image can't be resolved
-    await update_msg.reply_text(
-        f"🆕 New post from *#{creator}*:\n{title}",
-        parse_mode="Markdown",
-        reply_markup=_relay_keyboard(creator, content_id),
-    )
+    # ── MEDIA FAILED: report to Proxy; DO NOT send a fallback to the fan ──
+    try:
+        q = read_queue()
+        q.append({
+            "type": "proxy_alert",
+            "nyx_id": str(tg),
+            "source": "fan/_send_relay_from_queue",
+            "reason": "relay_media_unresolved",
+            "creator": creator,
+            "title": title,
+            "original_cmd": cmd,
+            "error": err,
+        })
+        write_queue(q)
+    except Exception:
+        # never leak errors to the fan
+        pass
 
 
 # ───────────────────────────────────────────────

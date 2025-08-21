@@ -56,7 +56,7 @@ async def _send_relay_from_queue(bot_msg, cmd: dict):
             pass
 
     await bot_msg.reply_text(
-        f"🆕 New post from #*{creator}*:\n{title}",
+        f"🔥 New post from #*{creator}*:\n{title}",
         parse_mode="Markdown",
         reply_markup=_relay_keyboard(creator),
     )
