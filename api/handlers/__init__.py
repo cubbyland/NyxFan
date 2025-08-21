@@ -17,6 +17,10 @@ from .callbacks import (
     set_weekly,
     toggle_mute,
     back_to_post,
+    # unlock flow
+    unlock_start,
+    unlock_back,
+    unlock_confirm,
 )
 from .error_handler import setup_error_handler
 
@@ -40,10 +44,10 @@ def register_handlers(app):
     # Command handlers
     app.add_handler(CommandHandler("start", start))
 
-    # Dashboard callbacks (original patterns)
-    app.add_handler(CallbackQueryHandler(show_alerts, pattern="^show_alerts$"))
-    app.add_handler(CallbackQueryHandler(show_digest, pattern="^view_digest$"))
-    app.add_handler(CallbackQueryHandler(show_settings, pattern="^show_settings$"))
+    # Dashboard callbacks
+    app.add_handler(CallbackQueryHandler(show_alerts,  pattern=r"^show_alerts$"))
+    app.add_handler(CallbackQueryHandler(show_digest,  pattern=r"^view_digest$"))
+    app.add_handler(CallbackQueryHandler(show_settings, pattern=r"^show_settings$"))
 
     # Per-post Settings menu callbacks
     app.add_handler(CallbackQueryHandler(show_settings_menu, pattern=r"^settings\|.+$"))
@@ -51,6 +55,12 @@ def register_handlers(app):
     app.add_handler(CallbackQueryHandler(set_weekly,         pattern=r"^set_weekly\|.+$"))
     app.add_handler(CallbackQueryHandler(toggle_mute,        pattern=r"^toggle_mute\|.+$"))
     app.add_handler(CallbackQueryHandler(back_to_post,       pattern=r"^back\|.+$"))
+
+    # Unlock flow callbacks
+    # "unlock" may arrive as "unlock" or "unlock|<content_id>"
+    app.add_handler(CallbackQueryHandler(unlock_start,   pattern=r"^unlock(\|.+)?$"))
+    app.add_handler(CallbackQueryHandler(unlock_back,    pattern=r"^unlock_back\|.+$"))
+    app.add_handler(CallbackQueryHandler(unlock_confirm, pattern=r"^unlock_confirm\|.+$"))
 
     # Error handler
     setup_error_handler(app)
