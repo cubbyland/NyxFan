@@ -30,36 +30,59 @@ def _looks_file_id(s: str) -> bool:
     return isinstance(s, str) and len(s) > 40 and s.startswith(("AgAC", "BQAC", "CAAC", "DQAC", "EAAC", "GAAC", "IAAC"))
 
 async def _send_relay_from_queue(bot_msg, cmd: dict):
+    """
+    Client-side send for "View All" deep-link.
+    Requirements:
+      - NO fallbacks visible to fans.
+      - Only send if we have a usable TG file_id (Fan-scoped ideally).
+      - Support photo / animation (GIF) / video / document based on file_id.
+      - If nothing usable, DO NOTHING (silent skip).
+    """
     creator = cmd.get("creator", "?")
     title   = cmd.get("title", "")
-    img     = cmd.get("image") or cmd.get("image_hex") or cmd.get("file_id")
+    caption = f"🔥 New post from #{creator}:\n\n{title}"
 
-    if isinstance(img, str) and _looks_file_id(img):
-        await bot_msg.reply_photo(
-            photo=img,
-            caption=f"🔥 New post from #{creator}:\n\n{title}",
-            reply_markup=_relay_keyboard(creator),
-        )
+    # Accept a few keys that might carry a TG file_id
+    def _fid():
+        for k in [
+            "file_id", "image", "photo",
+            "animation", "video", "document",
+            "image_file_id", "media_file_id",
+            "video_file_id", "animation_file_id", "document_file_id",
+            "teaser", "teaser_file_id",
+        ]:
+            v = cmd.get(k)
+            if isinstance(v, str) and len(v) > 20 and not v.startswith(("http://", "https://")):
+                return v
+        return None
+
+    fid = _fid()
+    if not fid:
+        return  # no leaks to the client
+
+    # Try in order; if the type is wrong, Telegram will raise; we just move on.
+    try:
+        await bot_msg.reply_photo(photo=fid, caption=caption, reply_markup=_relay_keyboard(creator))
         return
-
-    if isinstance(img, str) and _looks_hex(img):
-        try:
-            b = bytes.fromhex(img)
-            bio = BytesIO(b); bio.name = "post.jpg"
-            await bot_msg.reply_photo(
-                photo=bio,
-                caption=f"🔥 New post from #{creator}:\n\n{title}",
-                reply_markup=_relay_keyboard(creator),
-            )
-            return
-        except Exception:
-            pass
-
-    await bot_msg.reply_text(
-        f"🔥 New post from #*{creator}*:\n{title}",
-        parse_mode="Markdown",
-        reply_markup=_relay_keyboard(creator),
-    )
+    except Exception:
+        pass
+    try:
+        await bot_msg.reply_animation(animation=fid, caption=caption, reply_markup=_relay_keyboard(creator))
+        return
+    except Exception:
+        pass
+    try:
+        await bot_msg.reply_video(video=fid, caption=caption, reply_markup=_relay_keyboard(creator))
+        return
+    except Exception:
+        pass
+    try:
+        await bot_msg.reply_document(document=fid, caption=caption, reply_markup=_relay_keyboard(creator))
+        return
+    except Exception:
+        pass
+    # If all attempts fail, do not send any text fallback to the fan.
+    return
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):

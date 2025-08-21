@@ -97,89 +97,142 @@ async def _send_relay_from_queue(update_msg, tg: int, cmd: dict):
 # ───────────────────────────────────────────────
 # Dashboard handlers (expanded: handle relay + subchg + dm, and send real cards)
 # ───────────────────────────────────────────────
-async def show_alerts(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.callback_query.answer()
-    tg = update.effective_user.id
-    msg = update.callback_query.message
+# paste this full function over your existing one
+async def show_alerts(update, context):
+    """
+    Callback: "View All"
+    - Consume ONLY this user's pending items (relay/subchg/dm) from the shared queue
+    - Send each item exactly once
+    - THEN post a fresh dashboard at the bottom and delete the old dashboard(s)
+      so the dashboard stays anchored without triggering a push notification.
+    """
+    # Localized imports to avoid any top-level circulars
+    from io import BytesIO
+    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+    from telegram.error import BadRequest
+    from api.utils.io import read_queue, write_queue
+    from api.handlers.dashboard import build_dashboard
+    from api.utils.state import ALL_DASH_MSGS
+    from shared.fan_registry import get_telegram_id
 
+    cq = update.callback_query
+    await cq.answer()
+    tg = cq.from_user.id
+
+    def _looks_hex(s: str) -> bool:
+        if not isinstance(s, str) or len(s) % 2 != 0:
+            return False
+        try:
+            int(s, 16)
+            return True
+        except Exception:
+            return False
+
+    def _looks_file_id(s: str) -> bool:
+        return isinstance(s, str) and len(s) > 40 and s.startswith(("AgAC", "BQAC", "CAAC", "DQAC", "EAAC", "GAAC", "IAAC"))
+
+    def _relay_keyboard(creator: str, content_id: str | None = None) -> InlineKeyboardMarkup:
+        unlock_cb = f"unlock|{content_id}" if content_id else "unlock|none"
+        return InlineKeyboardMarkup([
+            [InlineKeyboardButton("Settings", callback_data=f"settings|{creator}"),
+             InlineKeyboardButton("Unlock",   callback_data=unlock_cb)]
+        ])
+
+    # ---- Consume this user's items from the shared queue (one-shot semantics)
     queue = read_queue()
-    alerts = [
-        c for c in queue
-        if isinstance(c, dict)
-        and c.get("type") in ("relay", "subchg", "dm")
-        and get_telegram_id(str(c.get("nyx_id"))) == tg
-    ]
+    mine: list[dict] = []
+    kept: list[dict] = []
 
-    if not alerts:
-        # 1) Tell the user
-        await msg.reply_text("🔔 No pending alerts.")
-        # 2) Capture old dashboards BEFORE sending the new one
-        old_ids = ALL_DASH_MSGS.get(tg, [])
-        # 3) Send a fresh dashboard at the bottom
-        new_text, new_kb = build_dashboard(tg)
-        new_msg = await context.bot.send_message(
-            chat_id=tg,
-            text=new_text,
-            parse_mode="Markdown",
-            reply_markup=new_kb,
-        )
-        ALL_DASH_MSGS[tg] = [new_msg.message_id]
-        # 4) Now delete the old dashboards so the new one stays at the bottom
-        for mid in old_ids:
-            try:
-                await context.bot.delete_message(chat_id=tg, message_id=mid)
-            except Exception:
-                pass
-    else:
-        # Have alerts → send them, then purge and rebuild dashboard (existing order OK)
-        for c in alerts:
+    for c in queue:
+        try:
             t = c.get("type")
-            if t == "relay":
-                await _send_relay_from_queue(msg, tg, c)
-            elif t == "dm":
-                await msg.reply_text(
-                    f"✉️ DM from *#{c.get('creator','?')}*:\n{c.get('message','')}",
-                    parse_mode="Markdown"
-                )
-            else:  # subchg
-                await msg.reply_text(
-                    f"💲 Price update by *#{c.get('creator','?')}*:\n{c.get('old_price','?')} → {c.get('new_price','?')}",
-                    parse_mode="Markdown"
-                )
+            if t not in ("relay", "subchg", "dm"):
+                kept.append(c)
+                continue
+            nyx = c.get("nyx_id")
+            if get_telegram_id(str(nyx)) != tg:
+                kept.append(c)
+                continue
+            # This item belongs to this user → consume now
+            mine.append(c)
+        except Exception:
+            # Defensive: if anything odd, don't drop it
+            kept.append(c)
 
-        remaining = [
-            c for c in queue
-            if not (
-                isinstance(c, dict)
-                and c.get("type") in ("relay", "subchg", "dm")
-                and get_telegram_id(str(c.get("nyx_id"))) == tg
+    # Write back the kept items; consumed ones are removed from disk
+    write_queue(kept)
+
+    # ---- Send each consumed item exactly once (in-order)
+    for c in mine:
+        t = c.get("type")
+        creator = c.get("creator", "?")
+
+        if t == "dm":
+            msg = f"✉️ DM from *#{creator}*:\n{c.get('message','')}"
+            await context.bot.send_message(chat_id=tg, text=msg, parse_mode="Markdown")
+            continue
+
+        if t == "subchg":
+            oldp = c.get("old_price", "?")
+            newp = c.get("new_price", "?")
+            msg = f"💲 Price update by *#{creator}*:\n{oldp} → {newp}"
+            await context.bot.send_message(chat_id=tg, text=msg, parse_mode="Markdown")
+            continue
+
+        if t == "relay":
+            title = c.get("title", "")
+            caption = f"🔥 New post from #{creator}:\n\n{title}"
+            content_id = c.get("content_id")
+            img = c.get("file_id") or c.get("image") or c.get("image_hex")
+
+            # Prefer Telegram file_id if present
+            if isinstance(img, str) and _looks_file_id(img):
+                await context.bot.send_photo(
+                    chat_id=tg,
+                    photo=img,
+                    caption=caption,
+                    reply_markup=_relay_keyboard(creator, content_id),
+                )
+                continue
+
+            # Hex bytes fallback
+            if isinstance(img, str) and _looks_hex(img):
+                try:
+                    bio = BytesIO(bytes.fromhex(img))
+                    bio.name = "post.jpg"
+                    await context.bot.send_photo(
+                        chat_id=tg,
+                        photo=bio,
+                        caption=caption,
+                        reply_markup=_relay_keyboard(creator, content_id),
+                    )
+                    continue
+                except Exception:
+                    pass
+
+            # Final text fallback
+            await context.bot.send_message(
+                chat_id=tg,
+                text=caption,
+                reply_markup=_relay_keyboard(creator, content_id),
             )
-        ]
-        write_queue(remaining)
 
-        # Delete old dashboards first (existing behavior), then send new
-        old_ids = ALL_DASH_MSGS.get(tg, [])
-        for mid in old_ids:
-            try:
-                await context.bot.delete_message(chat_id=tg, message_id=mid)
-            except Exception:
-                pass
+    # ---- Post a fresh dashboard at the bottom (no push; user initiated via callback)
+    text, kb = build_dashboard(tg)
+    new_msg = await context.bot.send_message(chat_id=tg, text=text, parse_mode="Markdown", reply_markup=kb)
 
-        new_text, new_kb = build_dashboard(tg)
-        new_msg = await context.bot.send_message(
-            chat_id=tg,
-            text=new_text,
-            parse_mode="Markdown",
-            reply_markup=new_kb,
-        )
-        ALL_DASH_MSGS[tg] = [new_msg.message_id]
+    # Delete any older dashboard messages to keep the thread clean
+    old_ids = ALL_DASH_MSGS.get(tg, [])
+    for mid in old_ids:
+        try:
+            await context.bot.delete_message(chat_id=tg, message_id=mid)
+        except BadRequest:
+            pass
+        except Exception:
+            pass
 
-    # remove the "View All" button message
-    try:
-        await msg.delete()
-    except Exception:
-        pass
-
+    # Track the latest dashboard message id
+    ALL_DASH_MSGS[tg] = [new_msg.message_id]
 
 async def show_digest(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
