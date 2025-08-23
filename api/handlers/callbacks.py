@@ -175,6 +175,11 @@ async def show_alerts(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await qd.answer()
     user_tg = qd.from_user.id
 
+    # NEW: refresh display name from callback user so restarts don’t lose it
+    from api.utils.state import USER_DISP
+    disp = qd.from_user.username or qd.from_user.full_name or str(user_tg)
+    USER_DISP[user_tg] = disp
+
     # 1) Gather and send items
     queue = read_queue()
     pending: List[dict] = []
@@ -240,7 +245,14 @@ async def show_digest(update: Update, context: ContextTypes.DEFAULT_TYPE):
     qd = update.callback_query
     await qd.answer()
     user_tg = qd.from_user.id
+
+    # NEW: refresh display name
+    from api.utils.state import USER_DISP
+    disp = qd.from_user.username or qd.from_user.full_name or str(user_tg)
+    USER_DISP[user_tg] = disp
+
     text, kb = build_dashboard(user_tg)
+
     try:
         await qd.message.edit_text(text, parse_mode="Markdown", reply_markup=kb)
     except Exception:
