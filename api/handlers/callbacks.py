@@ -484,8 +484,6 @@ async def unlock_back(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception:
         pass
 
-
-# --- replace this function in NyxFan/api/handlers/callbacks.py ---
 async def unlock_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     User tapped 'Confirm' on the purchase prompt.
@@ -540,13 +538,26 @@ async def unlock_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
     write_queue(q)
 
     # Revert caption (Settings-only)
+    from api.utils.state import ORIG_CAPTION
     orig_key = f"{chat_id}:{msg_id}"
     caption = ORIG_CAPTION.get(orig_key) or (query.message.caption or "New post")
+
+    def _extract_creator_from_caption(caption: str | None) -> str | None:
+        if not caption:
+            return None
+        try:
+            s = caption.split("from #", 1)[1]
+            return s.split(":", 1)[0].strip()
+        except Exception:
+            return None
+
     creator = _extract_creator_from_caption(caption) or "?"
     kb = InlineKeyboardMarkup([[InlineKeyboardButton("Settings", callback_data=f"settings|{creator}")]])
+
     try:
         await query.edit_message_caption(caption=caption, reply_markup=kb, parse_mode="Markdown")
     except Exception:
         pass
 
     await query.answer("Unlocked!")
+
