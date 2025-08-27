@@ -22,6 +22,7 @@ from api.utils.env import app
 from api.utils.errors import on_error
 from api.handlers import register_handlers
 from api.jobs.refresh import process_fan_queue
+from api.jobs.processor_fan import process_fan_jobs
 
 # Error handler
 app.add_error_handler(on_error)
@@ -43,6 +44,16 @@ app.job_queue.run_repeating(
     },
 )
 print("[NyxFan] fan dash_refresh worker scheduled.")
+
+print("[NyxFan] scheduling fan consumer…")
+app.job_queue.run_repeating(
+    process_fan_jobs,
+    interval=3.5,
+    first=1.0,
+    name="fan_consumer",
+    job_kwargs={"max_instances": 1, "coalesce": True, "misfire_grace_time": 60},
+)
+print("[NyxFan] fan consumer scheduled.")
 
 if __name__ == "__main__":
     print("🤖  NyxFan is live. (polling)")

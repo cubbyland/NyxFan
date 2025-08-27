@@ -35,7 +35,7 @@ def build_dashboard(tg_id: int) -> Tuple[str, InlineKeyboardMarkup]:
     for c in queue:
         try:
             t = c.get("type")
-            if t not in ("relay", "subchg", "dm"):
+            if t not in ("relay", "subchg", "dm", "fan_relay", "fan_dm"):
                 continue
             if get_telegram_id(str(c.get("nyx_id"))) != tg_id:
                 continue
@@ -46,11 +46,11 @@ def build_dashboard(tg_id: int) -> Tuple[str, InlineKeyboardMarkup]:
                 continue
 
             grp = summary.setdefault(creator, {"posts": 0, "prices": 0, "dms": 0})
-            if t == "relay":
+            if t == ("relay", "fan_relay"):
                 grp["posts"] += 1
             elif t == "subchg":
                 grp["prices"] += 1
-            elif t == "dm":
+            elif t == ("dm", "fan_dm"):
                 grp["dms"] += 1
         except Exception:
             continue

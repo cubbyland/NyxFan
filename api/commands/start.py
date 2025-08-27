@@ -112,7 +112,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             try:
                 if (
                     get_telegram_id(str(c.get("nyx_id"))) == tg
-                    and c.get("type") in ("relay", "subchg", "dm")
+                    and c.get("type") in ("relay", "subchg", "dm", "fan_relay", "fan_dm")
                     and len(arg.split("_", 2)) == 3
                     and arg.split("_", 2)[1] == c["type"]
                     and c.get("creator") == arg.split("_", 2)[2]

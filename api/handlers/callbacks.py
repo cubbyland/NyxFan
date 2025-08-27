@@ -240,7 +240,7 @@ async def show_alerts(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             if (
                 isinstance(c, dict)
-                and c.get("type") in ("relay", "dm", "subchg")
+                and c.get("type") in ("relay", "dm", "subchg", "fan_relay", "fan_dm")
                 and get_telegram_id(str(c.get("nyx_id"))) == user_tg
             ):
                 # Only surface muted creators; un-muted never appear here
@@ -259,9 +259,9 @@ async def show_alerts(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for c in pending:
         t = c.get("type")
         try:
-            if t == "relay":
+            if t == ("relay", "fan_relay"):
                 await _send_relay_from_cmd(qd.message, c)
-            elif t == "dm":
+            elif t == ("dm", "fan_dm"):
                 await qd.message.reply_text(
                     f"✉️ DM from *{c.get('creator','?')}*:\n{c.get('message','')}",
                     parse_mode="Markdown",
@@ -572,6 +572,7 @@ async def unlock_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     q.append({
         "type": "unlock_deliver",
+        "type": "fan_unlock_deliver",
         "nyx_id": str(tg_id),
         "teaser_msg_chat_id": chat_id,
         "teaser_msg_id": msg_id,
