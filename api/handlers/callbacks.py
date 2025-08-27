@@ -69,6 +69,70 @@ def _extract_creator_from_caption(caption: str | None) -> str | None:
 def _looks_file_id(s: str) -> bool:
     return isinstance(s, str) and len(s) > 20 and not s.startswith(("http://", "https://"))
 
+# ───────────────────────────── display-name + janitor helpers ─────────────────────────────
+
+def _display_name_from_user(u) -> str:
+    """
+    Prefer username (WITHOUT '@'); otherwise 'First Last'; otherwise the numeric id.
+    """
+    try:
+        if getattr(u, "username", None):
+            return f"{u.username}"
+        full = " ".join([x for x in [getattr(u, "first_name", None), getattr(u, "last_name", None)] if x]).strip()
+        return full or str(getattr(u, "id", "")).strip()
+    except Exception:
+        return str(getattr(u, "id", "")).strip()
+
+def _fix_dash_header(text: str, user_display: str, tg_id: int) -> str:
+    """
+    Replace any "<tg_id>'s dashboard" style header with "<user_display>'s dashboard".
+    Handles straight/curly apostrophes and common formats.
+    """
+    try:
+        import re
+        sid = re.escape(str(tg_id))
+        pats = [
+            rf"(\*+)?`?{sid}`?(\*+)?\s*[’']s\s+Dashboard",
+            rf"(\*+)?`?{sid}`?(\*+)?\s*[’']s\s+dashboard",
+            rf"dashboard\s+for\s+(\*+)?`?{sid}`?(\*+)?",
+        ]
+        out = text
+        for p in pats:
+            out = re.sub(p, f"{user_display}’s Dashboard", out, flags=re.IGNORECASE)
+        out = re.sub(rf"\b{sid}\b", user_display, out)
+        return out
+    except Exception:
+        return text
+
+async def _await_unlock_delivery(content_id: str, chat_id: int, *, timeout: float = 10.0, poll: float = 0.25) -> bool:
+    """
+    Wait until the Proxy has finished delivering the unlock (matching unlock_deliver
+    disappears from the queue). This ensures the dashboard lands AFTER the last unlockable.
+    """
+    import time, asyncio
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            q = read_queue()
+            pending = False
+            for c in q:
+                try:
+                    if (
+                        isinstance(c, dict)
+                        and c.get("type") == "unlock_deliver"
+                        and c.get("content_id") == content_id
+                        and (c.get("teaser_msg_chat_id") or c.get("fan_chat_id")) == chat_id
+                    ):
+                        pending = True
+                        break
+                except Exception:
+                    pass
+            if not pending:
+                return True
+        except Exception:
+            pass
+        await asyncio.sleep(poll)
+    return False
 
 async def _send_relay_from_cmd(msg, cmd: dict) -> None:
     """
@@ -165,17 +229,10 @@ def _set_user_prefs(tg_id: int, creator: str, **changes) -> dict:
 # ───────────────────────────── callbacks ─────────────────────────────
 
 async def show_alerts(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    On dashboard → 'View All'
-    - Send all pending RELAYs and DMs for this user
-    - Then re-post a fresh dashboard AT THE BOTTOM and delete the old dashboard
-      (so dashboard is always the last message; no push notification since the user is in-session)
-    """
     qd = update.callback_query
     await qd.answer()
-    user_tg = qd.from_user.id
+    user_tg = qd.from_user.id  # <- FIX
 
-    # 1) Gather and send items
     queue = read_queue()
     pending: List[dict] = []
     kept: List[dict] = []
@@ -186,13 +243,19 @@ async def show_alerts(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 and c.get("type") in ("relay", "dm", "subchg")
                 and get_telegram_id(str(c.get("nyx_id"))) == user_tg
             ):
-                pending.append(c)
+                # Only surface muted creators; un-muted never appear here
+                creator = str(c.get("creator", "?"))
+                from api.utils.io import read_notifs
+                prefs = (read_notifs() or {}).get(str(user_tg), {}).get(creator, {}) or {}
+                if prefs.get("muted", False):
+                    pending.append(c)
+                else:
+                    kept.append(c)
             else:
                 kept.append(c)
         except Exception:
             kept.append(c)
 
-    # Send RELAYs (media) and DMs as individual messages under the dashboard
     for c in pending:
         t = c.get("type")
         try:
@@ -209,44 +272,34 @@ async def show_alerts(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     parse_mode="Markdown",
                 )
         except Exception:
-            # no fan-face errors; just skip on failure
             pass
 
-    # Persist queue *as-is* (we don't consume those items here; Proxy demotes on mute and handles delivery)
-    # If you DO want to consume them, uncomment next line:
-    # write_queue(kept)
-
-    # 2) Re-post dashboard at bottom, delete previous dashboard(s)
+    # Re-post dashboard at bottom, delete previous dashboard(s)
     text, kb = build_dashboard(user_tg)
     try:
         new_dash = await qd.message.reply_text(text, parse_mode="Markdown", reply_markup=kb)
-        new_ids = [new_dash.message_id]
-
-        # delete older dashboards
+        from api.utils.state import ALL_DASH_MSGS
         for mid in ALL_DASH_MSGS.get(user_tg, []):
             try:
                 await context.bot.delete_message(chat_id=user_tg, message_id=mid)
             except Exception:
                 pass
-        ALL_DASH_MSGS[user_tg] = new_ids
+        ALL_DASH_MSGS[user_tg] = [new_dash.message_id]
     except Exception:
         pass
 
-
 async def show_digest(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    Minimal: just rebuild the dashboard (digests are handled via Proxy/Fan jobs).
-    """
     qd = update.callback_query
     await qd.answer()
-    user_tg = qd.from_user.id
+    user_tg = qd.from_user.id  # <- FIX
+
     text, kb = build_dashboard(user_tg)
     try:
         await qd.message.edit_text(text, parse_mode="Markdown", reply_markup=kb)
     except Exception:
-        # If edit fails (e.g., non-text), just send a new dashboard and delete old if tracked
         try:
             msg = await qd.message.reply_text(text, parse_mode="Markdown", reply_markup=kb)
+            from api.utils.state import ALL_DASH_MSGS
             for mid in ALL_DASH_MSGS.get(user_tg, []):
                 try:
                     await context.bot.delete_message(chat_id=user_tg, message_id=mid)
@@ -255,7 +308,6 @@ async def show_digest(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ALL_DASH_MSGS[user_tg] = [msg.message_id]
         except Exception:
             pass
-
 
 async def show_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
@@ -400,9 +452,6 @@ async def back_to_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id, mid = msg.chat_id, msg.message_id
     orig = ORIG_CAPTION.get(f"{chat_id}:{mid}", msg.caption or "")
 
-    # Try to recover a content_id from the original caption deep-link format? Not stored there.
-    # We keep Unlock button only if this post had content_id in queue; since we don't track it here,
-    # default to showing both Settings and Unlock — safe for teaser posts.
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("Settings", callback_data=f"settings|{creator}")],
     ])
@@ -472,18 +521,10 @@ async def unlock_back(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception:
         pass
 
-
-# --- replace this function in NyxFan/api/handlers/callbacks.py ---
 async def unlock_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    User tapped 'Confirm' on the purchase prompt.
-    - Revert the teaser caption back to original (Unlock removed; Settings remains).
-    - Enqueue 'unlock_deliver' for Proxy with content_id and (if available) items.
-    """
     query = update.callback_query
     await query.answer()
 
-    # Parse content_id from "unlock_confirm|<content_id>"
     data = query.data or ""
     try:
         _, content_id = data.split("|", 1)
@@ -494,9 +535,9 @@ async def unlock_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg_id  = query.message.message_id
     tg_id   = query.from_user.id
 
-    # Look up a matching unlock_register (if any)
     q = read_queue()
     reg = None
+    # 1) Try exact match (un-muted path tags teaser ids)
     for c in reversed(q):
         try:
             if (
@@ -510,13 +551,25 @@ async def unlock_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 break
         except Exception:
             pass
+    # 2) Fallback: last register with same content_id for this user (muted path)
+    if not reg:
+        for c in reversed(q):
+            try:
+                if (
+                    isinstance(c, dict)
+                    and c.get("type") == "unlock_register"
+                    and c.get("content_id") == content_id
+                    and str(c.get("nyx_id")) == str(tg_id)
+                ):
+                    reg = c
+                    break
+            except Exception:
+                pass
 
-    # Define items safely
     items = []
     if reg and isinstance(reg.get("items"), list):
         items = reg["items"]
 
-    # Always enqueue unlock_deliver; Proxy can resolve from register/raw if items is empty
     q.append({
         "type": "unlock_deliver",
         "nyx_id": str(tg_id),
@@ -527,7 +580,7 @@ async def unlock_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
     })
     write_queue(q)
 
-    # Revert caption (Settings-only)
+    # revert caption to original + toast
     orig_key = f"{chat_id}:{msg_id}"
     caption = ORIG_CAPTION.get(orig_key) or (query.message.caption or "New post")
     creator = _extract_creator_from_caption(caption) or "?"
@@ -536,5 +589,24 @@ async def unlock_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_caption(caption=caption, reply_markup=kb, parse_mode="Markdown")
     except Exception:
         pass
+    try:
+        await query.answer("Unlocked!")
+    except Exception:
+        pass
 
-    await query.answer("Unlocked!")
+    # Wait for proxy to finish deliver → then insert fresh dashboard
+    try:
+        await _await_unlock_delivery(content_id, chat_id, timeout=6.0, poll=0.25)
+    except Exception:
+        pass
+    try:
+        text, kb = build_dashboard(tg_id)
+        new_dash = await query.message.reply_text(text, parse_mode="Markdown", reply_markup=kb)
+        for mid in ALL_DASH_MSGS.get(tg_id, []):
+            try:
+                await context.bot.delete_message(chat_id=tg_id, message_id=mid)
+            except Exception:
+                pass
+        ALL_DASH_MSGS[tg_id] = [new_dash.message_id]
+    except Exception:
+        pass
