@@ -154,6 +154,17 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Send a fresh dashboard
     text, kb = build_dashboard(tg)
+    # local header fix (duplicated here to avoid circular imports)
+    import re
+    disp_local = update.effective_user.username or update.effective_user.full_name or str(tg)
+    sid = re.escape(str(tg))
+    for p in [
+        rf"(\*+)?`?{sid}`?(\*+)?\s*[’']s\s+Dashboard",
+        rf"(\*+)?`?{sid}`?(\*+)?\s*[’']s\s+dashboard",
+        rf"dashboard\s+for\s+(\*+)?`?{sid}`?(\*+)?",
+    ]:
+        text = re.sub(p, f"{disp_local}’s Dashboard", text, flags=re.IGNORECASE)
+    text = re.sub(rf"\b{sid}\b", disp_local, text)
     msg = await update.message.reply_text(text, parse_mode="Markdown", reply_markup=kb)
     new_ids = [msg.message_id]
 

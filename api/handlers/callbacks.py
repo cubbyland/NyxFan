@@ -50,21 +50,45 @@ def _kb_confirm(content_id: str) -> InlineKeyboardMarkup:
         InlineKeyboardButton("Confirm", callback_data=f"unlock_confirm|{content_id}"),
     ]])
 
-
-
 def _extract_creator_from_caption(caption: str | None) -> str | None:
     """
-    We format captions like: "🔥 New post from #<creator>:\n\n<title>"
-    Try to pull #<creator> back out for settings/unlock flows.
+    Extract "#<creator>" from captions like:
+      "🔥 New post from #<creator>:\n\n<title>"
     """
     if not caption:
         return None
     try:
-        s = caption.split("from #", 1)[1]
-        return s.split(":", 1)[0].strip()
+        s = caption
+        # strip hidden cid comment if present
+        if "<!--cid:" in s:
+            s = s.split("<!--", 1)[0]
+        if "from #" in s:
+            tail = s.split("from #", 1)[1]
+            creator = tail.split(":", 1)[0].strip()
+            creator = creator.splitlines()[0].strip()
+            return creator or None
+        return None
     except Exception:
         return None
 
+def _extract_title_from_caption(caption: str | None) -> str | None:
+    """
+    Extract <title> from:
+      "🔥 New post from #<creator>:\n\n<title>"
+    """
+    if not caption:
+        return None
+    try:
+        s = caption
+        if "<!--cid:" in s:
+            s = s.split("<!--", 1)[0]
+        if ":\n\n" in s:
+            return s.split(":\n\n", 1)[1].strip() or None
+        # fallback: first non-empty line after the first line
+        lines = [ln for ln in s.splitlines() if ln.strip()]
+        return (lines[1] if len(lines) > 1 else "").strip() or None
+    except Exception:
+        return None
 
 def _looks_file_id(s: str) -> bool:
     return isinstance(s, str) and len(s) > 20 and not s.startswith(("http://", "https://"))
@@ -284,6 +308,8 @@ async def show_alerts(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Re-post dashboard at bottom, delete previous dashboard(s)
     text, kb = build_dashboard(user_tg)
+    disp = _display_name_from_user(update.effective_user)
+    text = _fix_dash_header(text, disp, user_tg)
     try:
         new_dash = await qd.message.reply_text(text, parse_mode="Markdown", reply_markup=kb)
         from api.utils.state import ALL_DASH_MSGS
@@ -302,10 +328,14 @@ async def show_digest(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_tg = qd.from_user.id  # <- FIX
 
     text, kb = build_dashboard(user_tg)
+    disp = _display_name_from_user(update.effective_user)
+    text = _fix_dash_header(text, disp, user_tg)
     try:
         await qd.message.edit_text(text, parse_mode="Markdown", reply_markup=kb)
     except Exception:
         try:
+            disp = _display_name_from_user(update.effective_user)
+            text = _fix_dash_header(text, disp, user_tg)
             msg = await qd.message.reply_text(text, parse_mode="Markdown", reply_markup=kb)
             from api.utils.state import ALL_DASH_MSGS
             for mid in ALL_DASH_MSGS.get(user_tg, []):
@@ -583,17 +613,22 @@ async def unlock_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if reg and isinstance(reg.get("items"), list):
         items = reg["items"]
 
+    orig_caption = ORIG_CAPTION.get(f"{chat_id}:{msg_id}") or (query.message.caption or "")
+    creator_hint = (reg.get("creator") if reg else None) or _extract_creator_from_caption(orig_caption) or "?"
+    title_hint   = (reg.get("title")   if reg else None) or _extract_title_from_caption(orig_caption) or ""
+
     q.append({
         "type": "fan_unlock_deliver",
         "nyx_id": str(tg_id),
         "teaser_msg_chat_id": chat_id,
         "teaser_msg_id": msg_id,
         "content_id": content_id,
+        "creator": creator_hint,
+        "title": title_hint,
         "items": items,
     })
     write_queue(q)
 
-    # revert caption to original + toast
     orig_key = f"{chat_id}:{msg_id}"
     caption = ORIG_CAPTION.get(orig_key) or (query.message.caption or "New post")
     creator = _extract_creator_from_caption(caption) or "?"
@@ -614,6 +649,8 @@ async def unlock_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
         pass
     try:
         text, kb = build_dashboard(tg_id)
+        disp = _display_name_from_user(update.effective_user)
+        text = _fix_dash_header(text, disp, tg_id)
         new_dash = await query.message.reply_text(text, parse_mode="Markdown", reply_markup=kb)
         for mid in ALL_DASH_MSGS.get(tg_id, []):
             try:

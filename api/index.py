@@ -16,16 +16,27 @@ _HERE = Path(__file__).resolve()
 _PROJECT_ROOT = _HERE.parents[1]  # the directory that contains the 'api' package
 if str(_PROJECT_ROOT) not in _sys.path:
     _sys.path.insert(0, str(_PROJECT_ROOT))
-# --- end bootstrap
 
+from telegram import Update
+from telegram.ext import MessageHandler, ContextTypes, filters
 from api.utils.env import app
 from api.utils.errors import on_error
 from api.handlers import register_handlers
 from api.jobs.refresh import process_fan_queue
 from api.jobs.processor_fan import process_fan_jobs
 
+# --- Never run in groups/channels: auto-leave immediately ---
+async def _block_groups(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat = update.effective_chat
+    if chat and chat.type in ("group", "supergroup", "channel"):
+        try:
+            await context.bot.leave_chat(chat_id=chat.id)
+        except Exception:
+            pass
+
 # Error handler
 app.add_error_handler(on_error)
+app.add_handler(MessageHandler(~filters.ChatType.PRIVATE, _block_groups), group=-100)
 
 # Register all bot handlers (commands + callbacks)
 register_handlers(app)
