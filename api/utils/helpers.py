@@ -4,11 +4,15 @@ import json
 import sys
 from pathlib import Path
 from dotenv import load_dotenv
+from api.utils.env import app
+from telegram import Bot
 
 # Make the repository root (that contains `shared/`) importable.
 # This file lives at: <NyxFan>/api/utils/helpers.py
 ROOT = Path(__file__).resolve().parents[2]      # -> NyxFan/
-PROJECT_ROOT = ROOT.parents[0]                   # directory that should contain `shared/`
+PROJECT_ROOT = ROOT.parents[0]        
+
+fan_bot: Bot = app.bot           # directory that should contain `shared/`
 
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
@@ -39,6 +43,8 @@ def read_queue() -> list:
     except Exception:
         return []
 
-
 def write_queue(q: list) -> None:
     _write_text_atomic(QUEUE_PATH, json.dumps(q, indent=2))
+
+def alert_admin(text: str): 
+    print(f"[NyxFan ALERT] {text}")

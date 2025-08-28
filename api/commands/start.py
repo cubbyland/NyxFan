@@ -10,11 +10,11 @@ from api.utils.state import USER_DISP, ALL_DASH_MSGS
 from api.handlers.dashboard import build_dashboard
 from shared.fan_registry import register_user, get_telegram_id
 
-
-def _relay_keyboard(creator: str) -> InlineKeyboardMarkup:
+def _relay_keyboard(creator: str, content_id: str | None = None) -> InlineKeyboardMarkup:
+    unlock_cb = f"unlock|{content_id}" if content_id else "unlock"
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("Settings", callback_data=f"settings|{creator}"),
-         InlineKeyboardButton("Unlock",   callback_data="unlock")]
+         InlineKeyboardButton("Unlock",   callback_data=unlock_cb)]
     ])
 
 def _looks_hex(s: str) -> bool:
@@ -40,6 +40,7 @@ async def _send_relay_from_queue(bot_msg, cmd: dict):
     """
     creator = cmd.get("creator", "?")
     title   = cmd.get("title", "")
+    content_id = cmd.get("content_id") or cmd.get("id") or cmd.get("cid")
     caption = f"🔥 New post from #{creator}:\n\n{title}"
 
     # Accept a few keys that might carry a TG file_id
@@ -49,7 +50,7 @@ async def _send_relay_from_queue(bot_msg, cmd: dict):
             "animation", "video", "document",
             "image_file_id", "media_file_id",
             "video_file_id", "animation_file_id", "document_file_id",
-            "teaser", "teaser_file_id",
+            "teaser_file_id",
         ]:
             v = cmd.get(k)
             if isinstance(v, str) and len(v) > 20 and not v.startswith(("http://", "https://")):

@@ -46,11 +46,11 @@ def build_dashboard(tg_id: int) -> Tuple[str, InlineKeyboardMarkup]:
                 continue
 
             grp = summary.setdefault(creator, {"posts": 0, "prices": 0, "dms": 0})
-            if t == ("relay", "fan_relay"):
+            if t in ("relay", "fan_relay"):
                 grp["posts"] += 1
             elif t == "subchg":
                 grp["prices"] += 1
-            elif t == ("dm", "fan_dm"):
+            elif t in ("dm", "fan_dm"):
                 grp["dms"] += 1
         except Exception:
             continue

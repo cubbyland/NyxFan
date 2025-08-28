@@ -119,7 +119,7 @@ async def _await_unlock_delivery(content_id: str, chat_id: int, *, timeout: floa
                 try:
                     if (
                         isinstance(c, dict)
-                        and c.get("type") == "unlock_deliver"
+                        and c.get("type") in ("unlock_deliver", "fan_unlock_deliver")
                         and c.get("content_id") == content_id
                         and (c.get("teaser_msg_chat_id") or c.get("fan_chat_id")) == chat_id
                     ):
@@ -159,6 +159,11 @@ async def _send_relay_from_cmd(msg, cmd: dict) -> None:
             v = cmd.get(k)
             if isinstance(v, str) and _looks_file_id(v):
                 return v
+        tv = cmd.get("teaser")
+        if isinstance(tv, dict):
+            t_fid = tv.get("file_id")
+            if isinstance(t_fid, str) and _looks_file_id(t_fid):
+                return t_fid
         return None
 
     fid = _fid()
@@ -256,12 +261,15 @@ async def show_alerts(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             kept.append(c)
 
+    from api.utils.io import write_queue
+    write_queue(kept)
+
     for c in pending:
         t = c.get("type")
         try:
-            if t == ("relay", "fan_relay"):
+            if t in ("relay", "fan_relay"):
                 await _send_relay_from_cmd(qd.message, c)
-            elif t == ("dm", "fan_dm"):
+            elif t in ("dm", "fan_dm"):
                 await qd.message.reply_text(
                     f"✉️ DM from *{c.get('creator','?')}*:\n{c.get('message','')}",
                     parse_mode="Markdown",
@@ -482,7 +490,7 @@ async def unlock_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id, mid = msg.chat_id, msg.message_id
 
     # remember original caption so Back/Confirm can restore
-    ORIG_CAPTION[f"{chat_id}:{mid}"] = (msg.caption or "").strip()
+    ORIG_CAPTION[f"{chat_id}:{mid}"] = (msg.caption or "").strip() + f"\n<!--cid:{content_id}-->"
 
     confirm_text = "Are you sure you want to purchase this for X amount?"
     try:
@@ -512,11 +520,16 @@ async def unlock_back(update: Update, context: ContextTypes.DEFAULT_TYPE):
     orig = ORIG_CAPTION.get(f"{chat_id}:{mid}", msg.caption or "")
     creator = _extract_creator_from_caption(orig) or "?"
 
+    import re
+    m = re.search(r"<!--cid:(.+?)-->", orig)
+    cid = m.group(1) if m else None
+    clean = re.sub(r"\n?<!--cid:.+?-->", "", orig)
+
     try:
         await context.bot.edit_message_caption(
             chat_id=chat_id, message_id=mid,
-            caption=orig,
-            reply_markup=_kb_settings_unlock(creator, content_id)
+            caption=clean,
+            reply_markup=_kb_settings_unlock(creator, cid or content_id)
         )
     except Exception:
         pass
@@ -570,8 +583,7 @@ async def unlock_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if reg and isinstance(reg.get("items"), list):
         items = reg["items"]
 
-    q.append({
-        "type": "unlock_deliver",
+    q.append({{
         "type": "fan_unlock_deliver",
         "nyx_id": str(tg_id),
         "teaser_msg_chat_id": chat_id,
