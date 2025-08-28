@@ -55,11 +55,11 @@ async def _send_relay_from_queue(bot_msg, cmd: dict):
             v = cmd.get(k)
             if isinstance(v, str) and len(v) > 20 and not v.startswith(("http://", "https://")):
                 return v
-                t = cmd.get("teaser")
-        if isinstance(t, dict):
-            tv = t.get("file_id")
-            if isinstance(tv, str) and len(tv) > 20 and not tv.startswith(("http://", "https://")):
-                return tv
+        tv = cmd.get("teaser")
+        if isinstance(tv, dict):
+            t_fid = tv.get("file_id")
+            if isinstance(t_fid, str) and len(t_fid) > 20 and not t_fid.startswith(("http://", "https://")):
+                return t_fid
         return None
 
     fid = _fid()
@@ -115,19 +115,23 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         queue = read_queue()
         kept, to_send = [], []
         for c in queue:
-            if get_telegram_id(str(c.get("nyx_id"))) != tg:
-                kept.append(c); continue
-            if c.get("type") not in ("relay", "subchg", "dm", "fan_relay", "fan_dm"):
-                kept.append(c); continue
-            parts = arg.split("_", 2)
-            if len(parts) != 3:
-                kept.append(c); continue
-            frag_type, frag_creator = parts[1], parts[2]
-            base = "relay" if c.get("type") in ("relay", "fan_relay") else ("dm" if c.get("type") in ("dm", "fan_dm") else "subchg")
-            if frag_type == base and c.get("creator") == frag_creator:
-                to_send.append(c)
-            else:
-                kept.append(c)
+            try:
+                if get_telegram_id(str(c.get("nyx_id"))) != tg:
+                    kept.append(c); continue
+                if c.get("type") not in ("relay", "subchg", "dm", "fan_relay", "fan_dm"):
+                    kept.append(c); continue
+                parts = arg.split("_", 2)
+                if len(parts) != 3:
+                    kept.append(c); continue
+                frag_type, frag_creator = parts[1], parts[2]
+                base = (
+                    "relay" if c.get("type") in ("relay", "fan_relay")
+                    else ("dm" if c.get("type") in ("dm", "fan_dm") else "subchg")
+                )
+                if frag_type == base and c.get("creator") == frag_creator:
+                    to_send.append(c)
+                else:
+                    kept.append(c)
             except Exception:
                 kept.append(c)
         write_queue(kept)

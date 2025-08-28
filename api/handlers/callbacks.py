@@ -583,7 +583,7 @@ async def unlock_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if reg and isinstance(reg.get("items"), list):
         items = reg["items"]
 
-    q.append({{
+    q.append({
         "type": "fan_unlock_deliver",
         "nyx_id": str(tg_id),
         "teaser_msg_chat_id": chat_id,
