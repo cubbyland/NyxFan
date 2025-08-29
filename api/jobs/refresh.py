@@ -38,6 +38,25 @@ async def _edit_dashboard_if_exists(context: ContextTypes.DEFAULT_TYPE, tg: int)
     if not mid:
         return False
     text, kb = build_dashboard(tg)
+
+    # Make header show the user's display (username/full name) instead of numeric id
+    try:
+        chat = await context.bot.get_chat(tg)
+        disp_parts = [getattr(chat, "username", None)]
+        if not disp_parts[0]:
+            name = " ".join(x for x in [getattr(chat, "first_name", None), getattr(chat, "last_name", None)] if x)
+            disp = name.strip() if name else str(tg)
+        else:
+            disp = disp_parts[0]
+        # Replace common header forms
+        text = (
+            text.replace(f"{tg}’s Dashboard", f"{disp}’s Dashboard")
+                .replace(f"{tg}'s Dashboard", f"{disp}'s Dashboard")
+                .replace(str(tg), disp)
+        )
+    except Exception:
+        pass
+
     try:
         await context.bot.edit_message_text(
             chat_id=tg, message_id=mid,

@@ -17,6 +17,12 @@ from api.handlers.dashboard import build_dashboard
 from shared.fan_registry import get_telegram_id
 
 
+# Build the stable teaser caption (no hidden markers)
+def _teaser_caption(creator: str | None, title: str | None) -> str:
+    c = (creator or "?").lstrip("#")
+    t = (title or "").strip()
+    return f"🔥 New post from #{c}:\n\n{t}" if t else f"🔥 New post from #{c}"
+
 # ───────────────────────────── helpers ─────────────────────────────
 
 def _relay_keyboard(creator: str, content_id: str | None = None) -> InlineKeyboardMarkup:
@@ -194,29 +200,46 @@ async def _send_relay_from_cmd(msg, cmd: dict) -> None:
     if not fid:
         return
 
-    # Try in order; if wrong kind, Telegram raises → silently try next
+    sent = False
     try:
         await msg.reply_photo(photo=fid, caption=caption, reply_markup=_relay_keyboard(creator, content_id))
-        return
+        sent = True
     except Exception:
         pass
-    try:
-        await msg.reply_animation(animation=fid, caption=caption, reply_markup=_relay_keyboard(creator, content_id))
-        return
-    except Exception:
-        pass
-    try:
-        await msg.reply_video(video=fid, caption=caption, reply_markup=_relay_keyboard(creator, content_id))
-        return
-    except Exception:
-        pass
-    try:
-        await msg.reply_document(document=fid, caption=caption, reply_markup=_relay_keyboard(creator, content_id))
-        return
-    except Exception:
-        pass
-    # No fan-visible fallback.
+    if not sent:
+        try:
+            await msg.reply_animation(animation=fid, caption=caption, reply_markup=_relay_keyboard(creator, content_id))
+            sent = True
+        except Exception:
+            pass
+    if not sent:
+        try:
+            await msg.reply_video(video=fid, caption=caption, reply_markup=_relay_keyboard(creator, content_id))
+            sent = True
+        except Exception:
+            pass
+    if not sent:
+        try:
+            await msg.reply_document(document=fid, caption=caption, reply_markup=_relay_keyboard(creator, content_id))
+            sent = True
+        except Exception:
+            pass
 
+    if sent:
+        try:
+            q = read_queue()
+            print(f"[NyxFan] [_send_relay_from_cmd] sent teaser for creator={creator} cid={content_id}")
+
+            q.append({
+                "type": "fan_relay_ack",
+                "nyx_id": str(msg.chat_id),
+                "creator": creator,
+                "content_id": content_id,
+            })
+            write_queue(q)
+            log_queue("send_relay_from_cmd:after_ack_write")
+        except Exception:
+            pass
 
 def _get_user_prefs(tg_id: int, creator: str) -> dict:
     """
@@ -258,9 +281,14 @@ def _set_user_prefs(tg_id: int, creator: str, **changes) -> dict:
 # ───────────────────────────── callbacks ─────────────────────────────
 
 async def show_alerts(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    from api.utils.debug import log_queue
+
     qd = update.callback_query
     await qd.answer()
-    user_tg = qd.from_user.id  # <- FIX
+    user_tg = qd.from_user.id 
+
+    log_queue("show_alerts:before_scan")
+    log_queue("show_alerts:after_write_kept")
 
     queue = read_queue()
     pending: List[dict] = []
@@ -489,14 +517,14 @@ async def back_to_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = qd.message
     chat_id, mid = msg.chat_id, msg.message_id
     orig = ORIG_CAPTION.get(f"{chat_id}:{mid}", msg.caption or "")
+    creator = _extract_creator_from_caption(orig) or "?"
+    clean = (orig or "").strip()
+    kb = InlineKeyboardMarkup([[InlineKeyboardButton("Settings", callback_data=f"settings|{creator}")]])
 
-    kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("Settings", callback_data=f"settings|{creator}")],
-    ])
     try:
         await context.bot.edit_message_caption(
             chat_id=chat_id, message_id=mid,
-            caption=orig,
+            caption=clean,
             reply_markup=kb, parse_mode="Markdown",
         )
     except Exception:
@@ -520,7 +548,7 @@ async def unlock_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id, mid = msg.chat_id, msg.message_id
 
     # remember original caption so Back/Confirm can restore
-    ORIG_CAPTION[f"{chat_id}:{mid}"] = (msg.caption or "").strip() + f"\n<!--cid:{content_id}-->"
+    ORIG_CAPTION[f"{chat_id}:{mid}"] = (msg.caption or "").strip()
 
     confirm_text = "Are you sure you want to purchase this for X amount?"
     try:
@@ -549,17 +577,14 @@ async def unlock_back(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     orig = ORIG_CAPTION.get(f"{chat_id}:{mid}", msg.caption or "")
     creator = _extract_creator_from_caption(orig) or "?"
-
-    import re
-    m = re.search(r"<!--cid:(.+?)-->", orig)
-    cid = m.group(1) if m else None
-    clean = re.sub(r"\n?<!--cid:.+?-->", "", orig)
+    clean = (orig or "").strip()
+    kb = _kb_settings_unlock(creator, content_id)
 
     try:
         await context.bot.edit_message_caption(
             chat_id=chat_id, message_id=mid,
             caption=clean,
-            reply_markup=_kb_settings_unlock(creator, cid or content_id)
+            reply_markup=kb, parse_mode="Markdown",
         )
     except Exception:
         pass
@@ -629,14 +654,23 @@ async def unlock_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
     })
     write_queue(q)
 
+    log_queue("unlock_confirm:after_append_deliver")
+    # after dashboard rebuild and ALL_DASH_MSGS update:
+    log_queue("unlock_confirm:after_dashboard")
+
     orig_key = f"{chat_id}:{msg_id}"
-    caption = ORIG_CAPTION.get(orig_key) or (query.message.caption or "New post")
-    creator = _extract_creator_from_caption(caption) or "?"
-    kb = InlineKeyboardMarkup([[InlineKeyboardButton("Settings", callback_data=f"settings|{creator}")]])
+    stored = ORIG_CAPTION.get(orig_key) or ""
+    # Fall back to a freshly built caption if we don't have a stored one
+    orig_caption = stored or _teaser_caption(creator_hint, title_hint)
+
+    # Simple Settings-only keyboard after confirm
+    kb = InlineKeyboardMarkup([[InlineKeyboardButton("Settings", callback_data=f"settings|{creator_hint or '?'}")]])
+
     try:
-        await query.edit_message_caption(caption=caption, reply_markup=kb, parse_mode="Markdown")
+        await query.edit_message_caption(caption=orig_caption, reply_markup=kb, parse_mode="Markdown")
     except Exception:
         pass
+
     try:
         await query.answer("Unlocked!")
     except Exception:

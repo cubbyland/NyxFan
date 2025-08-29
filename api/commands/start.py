@@ -9,6 +9,7 @@ from api.utils.io import read_queue, write_queue
 from api.utils.state import USER_DISP, ALL_DASH_MSGS
 from api.handlers.dashboard import build_dashboard
 from shared.fan_registry import register_user, get_telegram_id
+from api.utils.debug import log_queue
 
 def _relay_keyboard(creator: str, content_id: str | None = None) -> InlineKeyboardMarkup:
     unlock_cb = f"unlock|{content_id}" if content_id else "unlock"
@@ -66,27 +67,46 @@ async def _send_relay_from_queue(bot_msg, cmd: dict):
     if not fid:
         return  # no leaks to the client
 
-    # Try in order; if the type is wrong, Telegram will raise; we just move on.
+    sent = False
     try:
         await bot_msg.reply_photo(photo=fid, caption=caption, reply_markup=_relay_keyboard(creator, content_id))
-        return
+        sent = True
     except Exception:
         pass
-    try:
-        await bot_msg.reply_animation(animation=fid, caption=caption, reply_markup=_relay_keyboard(creator, content_id))
-        return
-    except Exception:
-        pass
-    try:
-        await bot_msg.reply_video(video=fid, caption=caption, reply_markup=_relay_keyboard(creator, content_id))
-        return
-    except Exception:
-        pass
-    try:
-        await bot_msg.reply_document(document=fid, caption=caption, reply_markup=_relay_keyboard(creator, content_id))
-        return
-    except Exception:
-        pass
+    if not sent:
+        try:
+            await bot_msg.reply_animation(animation=fid, caption=caption, reply_markup=_relay_keyboard(creator, content_id))
+            sent = True
+        except Exception:
+            pass
+    if not sent:
+        try:
+            await bot_msg.reply_video(video=fid, caption=caption, reply_markup=_relay_keyboard(creator, content_id))
+            sent = True
+        except Exception:
+            pass
+    if not sent:
+        try:
+            await bot_msg.reply_document(document=fid, caption=caption, reply_markup=_relay_keyboard(creator, content_id))
+            sent = True
+        except Exception:
+            pass
+
+    if sent:
+        try:
+            q = read_queue()
+            q.append({
+                "type": "fan_relay_ack",
+                "nyx_id": str(bot_msg.chat_id),
+                "creator": creator,
+                "content_id": content_id,
+            })
+            write_queue(q)
+        except Exception:
+            pass
+        
+        log_queue("nyxfan:_send_relay_from_queue:after_ack")
+
     # If all attempts fail, do not send any text fallback to the fan.
     return
 
@@ -108,10 +128,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     queue = read_queue()
     queue.append({"type": "joined", "nyx_id": str(tg), "display": disp})
     write_queue(queue)
+    log_queue("nyxfan:start:after_joined")
 
     # Deep-link filter handling
     if context.args:
         arg = context.args[0]
+        log_queue("nyxfan:start:deeplink:begin")
         queue = read_queue()
         kept, to_send = [], []
         for c in queue:
@@ -135,6 +157,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except Exception:
                 kept.append(c)
         write_queue(kept)
+        log_queue("nyxfan:start:deeplink:after_write_kept")
 
         for c in to_send:
             t = c.get("type")
@@ -151,6 +174,35 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f"💲 Price update by *{c.get('creator','?')}*:\n{c.get('old_price','?')} → {c.get('new_price','?')}",
                     parse_mode="Markdown"
                 )
+        log_queue("nyxfan:start:deeplink:after_emit_items")
+        
+        # After fulfilling the deep-link request, rebuild the dashboard immediately
+        log_queue("nyxfan:start:deeplink:before_filter")
+
+        text, kb = build_dashboard(tg)
+        import re
+        disp_local = update.effective_user.username or update.effective_user.full_name or str(tg)
+        sid = re.escape(str(tg))
+        for p in [
+            rf"(\*+)?`?{sid}`?(\*+)?\s*[’']s\s+Dashboard",
+            rf"(\*+)?`?{sid}`?(\*+)?\s*[’']s\s+dashboard",
+            rf"dashboard\s+for\s+(\*+)?`?{sid}`?(\*+)?",
+        ]:
+            text = re.sub(p, f"{disp_local}’s Dashboard", text, flags=re.IGNORECASE)
+        text = re.sub(rf"\b{sid}\b", disp_local, text)
+        try:
+            dash_msg = await update.message.reply_text(text, parse_mode="Markdown", reply_markup=kb)
+            # Clean any older dashboards we were tracking
+            from api.utils.state import ALL_DASH_MSGS
+            for mid in ALL_DASH_MSGS.get(tg, []):
+                try:
+                    await context.bot.delete_message(chat_id=tg, message_id=mid)
+                except Exception:
+                    pass
+            ALL_DASH_MSGS[tg] = [dash_msg.message_id]
+            return 
+        except Exception:
+            pass
 
     # Send a fresh dashboard
     text, kb = build_dashboard(tg)
@@ -169,10 +221,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     new_ids = [msg.message_id]
 
     # Delete older dashboards if we have them tracked
-    for mid in ALL_DASH_MSGS.get(tg, []):
+    prev = ALL_DASH_MSGS.get(tg, [])
+    for mid in prev:
         try:
             await context.bot.delete_message(chat_id=tg, message_id=mid)
         except Exception:
             pass
 
     ALL_DASH_MSGS[tg] = new_ids
+    log_queue("nyxfan:start:end")
+
+
